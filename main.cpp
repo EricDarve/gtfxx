@@ -15,7 +15,7 @@
 #include <atomic>
 #include <functional>
 
-#include <gperftools/profiler.h>
+//#include <gperftools/profiler.h>
 
 #include <Eigen/Dense>
 using Eigen::MatrixXd;
@@ -352,7 +352,7 @@ void test()
     }
 
     {
-        const int n_thread = 32;
+        const int n_thread = 4;
 
         // Create thread team
         Thread_team team(n_thread);
@@ -368,10 +368,10 @@ void test()
         }
 
 
-        ProfilerStart("ctxx.pprof");
+        //ProfilerStart("ctxx.pprof");
         team.start();
 
-        const int max_count = 100000;
+        const int max_count = 1000;
         for(int it=0; it < max_count; ++it) {
             for(int nt=0; nt<n_thread; ++nt) {
                 team.run(nt, &tsk[nt]);
@@ -379,7 +379,7 @@ void test()
         }
 
         team.join();
-        ProfilerStop();
+        //ProfilerStop();
 
         for(int nt=0; nt<n_thread; ++nt) {
             assert(counter[nt].load() == max_count);
