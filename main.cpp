@@ -1,3 +1,6 @@
+#include <iostream>
+#include <sstream>
+#include <string>
 #include <cstdio>
 #include <cassert>
 #include <exception>
@@ -12,6 +15,8 @@
 #include <atomic>
 #include <functional>
 
+#include <gperftools/profiler.h>
+
 #include <Eigen/Dense>
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
@@ -22,6 +27,40 @@ using std::thread;
 using std::mutex;
 using std::bind;
 typedef std::function<void()> Base_task;
+
+// Builds a logging message and outputs it in the destructor
+class LogMessage {
+public:
+    LogMessage(const char * file, const char * function, int line)
+    {
+        os << file << ":" << line << " (" << function << ") ";
+    }
+
+    // output operator
+    template<typename T>
+    LogMessage & operator<<(const T & t)
+    {
+        os << t;
+        return *this;
+    }
+
+    ~LogMessage()
+    {
+        os << "\n";
+        std::cout << os.str();
+        std::cout.flush();
+    }
+private:
+    std::ostringstream os;
+};
+
+#if 0
+#define LOG(out) do { \
+  LogMessage(__FILE__,__func__,__LINE__) << out; \
+} while (0)
+#else
+#define LOG(out)
+#endif
 
 void f_1()
 {
@@ -36,7 +75,7 @@ void f_x(int * x)
     --(*x);
 };
 
-void f_count(int * c)
+void f_count(std::atomic_int * c)
 {
     ++(*c);
 };
@@ -85,10 +124,9 @@ public:
     };
 };
 
-struct Thread_team;
-
 struct Thread_prio;
-void spin(Thread_prio * a_prio_t);
+void spin(Thread_prio * a_thread);
+struct Thread_team;
 
 // Thread with priority queue management
 struct Thread_prio {
@@ -96,40 +134,51 @@ struct Thread_prio {
     thread th;
     mutex mtx;
     std::condition_variable cv;
+    std::atomic_bool m_empty;
+    // For optimization to avoid testing ready_queue.empty() in some cases
     std::atomic_bool m_stop;
     Thread_team * team;
-    Task tsk;
-
-    static void final_task() {};
+    unsigned short m_id;
 
     // Thread starts executing the function spin()
     void start()
     {
+        m_empty.store(true);
         m_stop.store(false); // Used to return from spin()
-        tsk = Task(final_task); // Task is inserted in queue at the end
         th = thread(spin, this); // Execute tasks in queue
     };
 
     // Add new task to queue
     void run(Task * a_t)
     {
+        LOG("lck " << m_id);
         std::lock_guard<std::mutex> lck(mtx);
         ready_queue.push(a_t); // Add task to queue
-        cv.notify_all(); // Wake up thread if needed
+        m_empty.store(false);
+        cv.notify_one(); // Wake up thread
+        LOG("unlck " << m_id);
+    };
+
+    Task* pop()
+    {
+        Task* tsk = ready_queue.top();
+        ready_queue.pop();
+        if (ready_queue.empty()) m_empty.store(true);
+        return tsk;
     };
 
     // Set stop boolean to true so spin() can return
     void stop()
     {
-        m_stop.store(true); // Set boolean to true
-        run(&tsk); // Run a final (empty) task to wake up the thread if needed
+        m_stop.store(true);
+        cv.notify_one(); // Wake up thread
     };
 
     // join() the thread
     void join()
     {
         stop();
-        if(th.joinable()) {
+        if (th.joinable()) {
             th.join();
         }
     }
@@ -140,33 +189,15 @@ struct Thread_prio {
     }
 };
 
-// Keep executing tasks until m_continue = false
-void spin(Thread_prio * a_prio_t)
-{
-    std::unique_lock<std::mutex> lck(a_prio_t->mtx);
-    while (true) {
-        while (!a_prio_t->ready_queue.empty()) {
-            Task * t = a_prio_t->ready_queue.top();
-            a_prio_t->ready_queue.pop();
-            lck.unlock();
-            (*t)();
-            lck.lock();
-        }
-        // queue must be empty
-        if (a_prio_t->m_stop.load()) { // if stop=true then return
-            return;
-        }
-        // Wait if queue is empty
-        while (a_prio_t->ready_queue.empty()) a_prio_t->cv.wait(lck);
-    }
-}
-
 struct Thread_team : public vector<Thread_prio*> {
     vector<Thread_prio> v_thread;
 
     Thread_team(const int n_thread) : v_thread(n_thread)
     {
-        for (auto& th : v_thread) th.team = this;
+        for (int i=0; i<n_thread; ++i) {
+            v_thread[i].team = this;
+            v_thread[i].m_id = static_cast<unsigned short>(i);
+        }
     }
 
     void start()
@@ -181,11 +212,78 @@ struct Thread_team : public vector<Thread_prio*> {
     {
         for (auto& th : v_thread) th.join();
     }
-    void run(const int a_thread, Task * a_task)
+
+    void run(const int a_id, Task * a_task)
     {
-        v_thread[a_thread].run(a_task);
+        int id_ = a_id;
+        // Check if queue is empty
+        if (!v_thread[a_id].m_empty.load()) {
+            // Check whether other threads have empty queues
+            for (unsigned long i=0; i<v_thread.size(); ++i) {
+                if (static_cast<unsigned short>(i) != a_id && v_thread[i].m_empty.load()) {
+                    id_ = i;
+                    break;
+                }
+            }
+        }
+        // Note that because we are not using locks, the queue may no longer be empty.
+        // But this implementation is more efficient than using locks.
+        v_thread[id_].run(a_task);
+    }
+
+    void steal(unsigned short a_id)
+    {
+        for (unsigned long i=0; i<v_thread.size(); ++i) {
+            if (static_cast<unsigned short>(i) != a_id) {
+                Thread_prio & thread_ = v_thread[i];
+                if (!thread_.m_empty.load()) {
+                    LOG("lck " << a_id);
+                    std::unique_lock<std::mutex> lck(thread_.mtx);
+                    if (!thread_.ready_queue.empty()) {
+                        Task * tsk = thread_.pop();
+                        LOG("unlck " << a_id);
+                        lck.unlock();
+                        v_thread[a_id].run(tsk);
+                        break;
+                    }
+                    LOG("unlck " << a_id);
+                }
+            }
+        }
     }
 };
+
+// Keep executing tasks until m_stop = true && queue is empty
+void spin(Thread_prio * a_thread)
+{
+    LOG("lck " << a_thread->m_id);
+    std::unique_lock<std::mutex> lck(a_thread->mtx);
+    while (true) {
+        while (!a_thread->ready_queue.empty()) {
+            Task * tsk = a_thread->pop();
+            LOG("unlck " << a_thread->m_id);
+            lck.unlock();
+            (*tsk)();
+            LOG("lck " << a_thread->m_id);
+            lck.lock();
+        }
+        // Try to steal a task
+        LOG("unlck " << a_thread->m_id);
+        lck.unlock();
+        a_thread->team->steal(a_thread->m_id);
+        LOG("lck " << a_thread->m_id);
+        lck.lock();
+        // Wait if queue is empty
+        while (a_thread->ready_queue.empty()) {
+            // Return if stop=true
+            if (a_thread->m_stop.load()) {
+                LOG("unlck " << a_thread->m_id);
+                return;
+            }
+            a_thread->cv.wait(lck);
+        }
+    }
+}
 
 void test();
 
@@ -254,20 +352,26 @@ void test()
     }
 
     {
-        const int n_thread = 2;
+        const int n_thread = 32;
 
         // Create thread team
         Thread_team team(n_thread);
-        vector<int> counter(n_thread, 0);
+        vector<std::atomic_int> counter(n_thread);
+
+        for(auto & c : counter) {
+            c.store(0);
+        }
 
         vector<Task> tsk(n_thread);
         for(int nt=0; nt<n_thread; ++nt) {
             tsk[nt] = static_cast<Task>(bind(f_count, &counter[nt]));
         }
 
+
+        ProfilerStart("ctxx.pprof");
         team.start();
 
-        const int max_count = 100;
+        const int max_count = 100000;
         for(int it=0; it < max_count; ++it) {
             for(int nt=0; nt<n_thread; ++nt) {
                 team.run(nt, &tsk[nt]);
@@ -275,9 +379,10 @@ void test()
         }
 
         team.join();
+        ProfilerStop();
 
         for(int nt=0; nt<n_thread; ++nt) {
-            assert(counter[nt] == max_count);
+            assert(counter[nt].load() == max_count);
         }
     }
 }
