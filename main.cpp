@@ -14,8 +14,14 @@
 #include <condition_variable>
 #include <atomic>
 #include <functional>
+#include <chrono>
 
-//#include <gperftools/profiler.h>
+#define PROFILER
+#ifdef PROFILER
+#include <gperftools/profiler.h>
+#endif
+
+using namespace std::chrono;
 
 #include <Eigen/Dense>
 using Eigen::MatrixXd;
@@ -78,6 +84,7 @@ void f_x(int * x)
 void f_count(std::atomic_int * c)
 {
     ++(*c);
+    std::this_thread::sleep_for(microseconds(20));
 };
 
 struct Fun_mv {
@@ -151,12 +158,11 @@ struct Thread_prio {
     // Add new task to queue
     void run(Task * a_t)
     {
-        LOG("lck " << m_id);
+        LOG(m_id);
         std::lock_guard<std::mutex> lck(mtx);
         ready_queue.push(a_t); // Add task to queue
         m_empty.store(false);
         cv.notify_one(); // Wake up thread
-        LOG("unlck " << m_id);
     };
 
     Task* pop()
@@ -170,6 +176,8 @@ struct Thread_prio {
     // Set stop boolean to true so spin() can return
     void stop()
     {
+        LOG(m_id);
+        std::lock_guard<std::mutex> lck(mtx);
         m_stop.store(true);
         cv.notify_one(); // Wake up thread
     };
@@ -226,6 +234,7 @@ struct Thread_team : public vector<Thread_prio*> {
                 }
             }
         }
+        LOG("requested thread: " << a_id << " got " << id_);
         // Note that because we are not using locks, the queue may no longer be empty.
         // But this implementation is more efficient than using locks.
         v_thread[id_].run(a_task);
@@ -237,16 +246,14 @@ struct Thread_team : public vector<Thread_prio*> {
             if (static_cast<unsigned short>(i) != a_id) {
                 Thread_prio & thread_ = v_thread[i];
                 if (!thread_.m_empty.load()) {
-                    LOG("lck " << a_id);
                     std::unique_lock<std::mutex> lck(thread_.mtx);
                     if (!thread_.ready_queue.empty()) {
                         Task * tsk = thread_.pop();
-                        LOG("unlck " << a_id);
                         lck.unlock();
+                        LOG(a_id << " from " << i);
                         v_thread[a_id].run(tsk);
                         break;
                     }
-                    LOG("unlck " << a_id);
                 }
             }
         }
@@ -256,30 +263,28 @@ struct Thread_team : public vector<Thread_prio*> {
 // Keep executing tasks until m_stop = true && queue is empty
 void spin(Thread_prio * a_thread)
 {
-    LOG("lck " << a_thread->m_id);
+    LOG(a_thread->m_id);
     std::unique_lock<std::mutex> lck(a_thread->mtx);
     while (true) {
         while (!a_thread->ready_queue.empty()) {
             Task * tsk = a_thread->pop();
-            LOG("unlck " << a_thread->m_id);
             lck.unlock();
+            LOG(a_thread->m_id << " task()");
             (*tsk)();
-            LOG("lck " << a_thread->m_id);
             lck.lock();
         }
         // Try to steal a task
-        LOG("unlck " << a_thread->m_id);
         lck.unlock();
         a_thread->team->steal(a_thread->m_id);
-        LOG("lck " << a_thread->m_id);
         lck.lock();
         // Wait if queue is empty
         while (a_thread->ready_queue.empty()) {
             // Return if stop=true
             if (a_thread->m_stop.load()) {
-                LOG("unlck " << a_thread->m_id);
+                LOG(a_thread->m_id << " stop");
                 return;
             }
+            LOG(a_thread->m_id << " wait");
             a_thread->cv.wait(lck);
         }
     }
@@ -352,7 +357,7 @@ void test()
     }
 
     {
-        const int n_thread = 4;
+        const int n_thread = 8;
 
         // Create thread team
         Thread_team team(n_thread);
@@ -367,19 +372,50 @@ void test()
             tsk[nt] = static_cast<Task>(bind(f_count, &counter[nt]));
         }
 
+        const int max_count = 10000;
 
-        //ProfilerStart("ctxx.pprof");
-        team.start();
-
-        const int max_count = 1000;
-        for(int it=0; it < max_count; ++it) {
-            for(int nt=0; nt<n_thread; ++nt) {
-                team.run(nt, &tsk[nt]);
+#ifdef PROFILER
+        ProfilerStart("ctxx.pprof");
+#endif
+        {
+            team.start();
+            auto start = high_resolution_clock::now();
+            for(int it=0; it < max_count; ++it) {
+                for(int nt=0; nt<n_thread; ++nt) {
+                    team.run(0, &tsk[nt]);
+                }
             }
+            team.join();
+            auto end = high_resolution_clock::now();
+            auto duration_ = duration_cast<milliseconds>(end - start);
+            std::cout << "Elapsed: " << duration_.count() << "\n";
         }
 
-        team.join();
-        //ProfilerStop();
+        for(int nt=0; nt<n_thread; ++nt) {
+            assert(counter[nt].load() == max_count);
+        }
+
+        for(auto & c : counter) {
+            c.store(0);
+        }
+
+        {
+            team.start();
+            auto start = high_resolution_clock::now();
+            for(int it=0; it < max_count; ++it) {
+                for(int nt=0; nt<n_thread; ++nt) {
+                    team.run(nt, &tsk[nt]);
+                }
+            }
+            team.join();
+            auto end = high_resolution_clock::now();
+            auto duration_ = duration_cast<milliseconds>(end - start);
+            std::cout << "Elapsed: " << duration_.count() << "\n";
+        }
+
+#ifdef PROFILER
+        ProfilerStop();
+#endif
 
         for(int nt=0; nt<n_thread; ++nt) {
             assert(counter[nt].load() == max_count);
