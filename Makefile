@@ -1,8 +1,13 @@
-#FLAGS=-std=c++11 -O2 -Wall -Wextra -Wnon-virtual-dtor -pedantic
-FLAGS=-std=c++11 -O2 -Wall -Wextra -pedantic -lprofiler -Wl,-no_pie
-#FLAGS=-std=c++11 -lprofiler -Wl,-no_pie -g
-#FLAGS=-std=c++11 -O2 -lprofiler -g -Wl,-no_pie
+# default
+# FLAGS=-std=c++11 -O2
+# debug
+FLAGS=-std=c++11 -g -Wall -Wextra -Wnon-virtual-dtor -pedantic
+# google profiler
+#FLAGS=-DPROFILER -std=c++11 -O2 -Wall -Wextra -pedantic -lprofiler -Wl,-no_pie
+#FLAGS=-DPROFILER -std=c++11 -lprofiler -Wl,-no_pie -g
+# gcov
 #FLAGS=-std=c++11 -fprofile-arcs -ftest-coverage
+
 INC=-I/usr/local/Cellar/eigen/3.3.4/include/eigen3
 
 ctxx: main.cpp
