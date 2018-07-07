@@ -74,7 +74,7 @@ private:
     std::ostringstream os;
 };
 
-#if 1
+#if 0
 #define LOG(out) do { \
   LogMessage(__FILE__,__func__,__LINE__) << out; \
 } while (0)
@@ -346,13 +346,13 @@ struct Task_graph {
 
     // How to initialize a task
     virtual void initialize_task(int3&,Task*) = 0;
-    // Mapping from int3 index to thread id
+    // Mapping from int3 task index to thread id
     virtual int task_map(int3 & idx) = 0;
 
     // Find a task in the graph and return pointer
     Task * find_task(int3&);
     // Is the task ready to run?
-    void isready(int3&, Task*);
+    void isready_then_run(int3&, Task*);
     // Decrement the dependency counter and run task if ready
     void decrement(int3 &);
 
@@ -364,7 +364,7 @@ struct Task_graph {
     }
 
     // Decrement task counter by 1; return true when all tasks have been posted
-    bool isdone_and_decrement()
+    bool decrement_alldone()
     {
         --n_tasks;
         LOG(n_tasks.load());
@@ -396,10 +396,11 @@ Task * Task_graph::find_task(int3 & idx)
     return t_;
 }
 
-void Task_graph::isready(int3 & idx, Task * a_tsk)
+void Task_graph::isready_then_run(int3 & idx, Task * a_tsk)
 {
     assert(a_tsk != nullptr);
     assert(a_tsk->indegree.load() >= 0);
+
     if (a_tsk->indegree.load() == 0) { // task is ready to run
 
         LOG("run task " << idx[0] << " " << idx[1] << " " << idx[2]);
@@ -414,7 +415,7 @@ void Task_graph::isready(int3 & idx, Task * a_tsk)
         }
 
         // Test whether all tasks have been posted
-        if (isdone_and_decrement()) {
+        if (decrement_alldone()) {
             std::unique_lock<std::mutex> lck(mtx_done);
             done = true;
             cond_done.notify_one(); // Notify waiting thread
@@ -429,7 +430,7 @@ void Task_graph::decrement(int3 & idx)
     // Decrement counter
     --( t_->indegree );
 
-    isready(idx, t_);
+    isready_then_run(idx, t_);
 }
 
 struct Block_matrix : vector<MatrixXd*> {
@@ -458,9 +459,10 @@ struct Gemm_graph: public Task_graph {
     Block_matrix A, B, C;
 
     void initialize_task(int3&, Task*);
+
     int task_map(int3 & idx)
     {
-        return ( idx[0] + size_i * (idx[1] + size_j * idx[2]) ) % ( team->v_thread.size() );
+        return ( ( idx[0] + size_i * idx[1] ) % ( team->v_thread.size() ) );
     }
 
     void start();
@@ -477,9 +479,11 @@ void fun_gemm(Gemm_graph * m_g, int i, int j, int k)
     assert(j>=0 && j<m_g->size_j);
     assert(k>=0 && k<m_g->size_k);
     LOG(i << " " << j << " " << k);
+
     run_gemm(m_g->A(i,k), m_g->B(k,j), m_g->C(i,j));
 
     if (k < m_g->size_k - 1) {
+        // Release dependency on the next task
         int3 idx = {i,j,k+1};
         m_g->decrement(idx);
     }
@@ -488,7 +492,7 @@ void fun_gemm(Gemm_graph * m_g, int i, int j, int k)
 void Gemm_graph::initialize_task(int3 & idx, Task* a_tsk)
 {
     assert(a_tsk != nullptr);
-    if (idx[2] > 0) {
+    if (idx[2] > 0) { // index k
         a_tsk->indegree.store(1);
     }
     else {
@@ -513,7 +517,7 @@ void Gemm_graph::start()
         for (int j=0; j<size_j; ++j) {
             int3 idx = {i,j,0};
             Task * t_ = find_task(idx);
-            isready(idx, t_);
+            isready_then_run(idx, t_);
         }
     }
 }
@@ -659,18 +663,21 @@ void test()
 #endif
 
     {
-        // Initialize GEMM matrices
-        std::mt19937 mers_rand;
-        // Seed the engine
-        mers_rand.seed(2018);
+        const int nb = 4; // number of blocks
+        const int b = 128; // size of blocks
 
-        const int nb = 3; // number of blocks
-        const int b = 1; // size of blocks
+        const int n_thread = 4; // Number of threads to use
+
         const int n = b*nb; // matrix size
 
         MatrixXd A(n,n), B(n,n);
 
         LOG("matrix");
+
+        // Initialize GEMM matrices
+        std::mt19937 mers_rand;
+        // Seed the engine
+        mers_rand.seed(2018);
 
         for (int i=0; i<n; ++i) {
             for (int j=0; j<n; ++j) {
@@ -679,7 +686,12 @@ void test()
             }
         }
 
+        auto start = high_resolution_clock::now();
         auto C = A*B;
+        auto x = C(0,0);
+        auto end = high_resolution_clock::now();
+        auto duration_ = duration_cast<milliseconds>(end - start);
+        std::cout << "A*B elapsed: " << duration_.count() << "\n";
 
         LOG("init");
 
@@ -710,6 +722,8 @@ void test()
             }
         }
 
+
+        start = high_resolution_clock::now();
         // Calculate matrix product using blocks
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
@@ -718,7 +732,11 @@ void test()
                 }
             }
         }
+        end = high_resolution_clock::now();
+        duration_ = duration_cast<milliseconds>(end - start);
+        std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
 
+        // First test
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
                 assert(*gemm_g.C(i,j) == C.block(i*b,j*b,b,b));
@@ -740,10 +758,12 @@ void test()
 
         LOG("graph_init");
 
+        // Second test
         assert(C == C0);
 
         // Re-doing calculation using task graph
 
+        // Init C
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
                 *(gemm_g.C(i,j)) = MatrixXd::Zero(b,b);
@@ -751,13 +771,17 @@ void test()
         }
 
         // Create thread team
-        const int n_thread = 4;
         Thread_team team(n_thread);
 
         gemm_g.team = &team;
 
         // Start team of threads
         team.start();
+
+#ifdef PROFILER
+        ProfilerStart("ctxx.pprof");
+#endif
+        start = high_resolution_clock::now();
 
         LOG("start");
         // Create seed tasks in graph and start
@@ -766,9 +790,18 @@ void test()
         LOG("wait");
         // Wait for all tasks to be posted
         gemm_g.wait();
+
         LOG("join");
         // Wait for end of task queue execution
         team.join();
+
+#ifdef PROFILER
+        ProfilerStop();
+#endif
+
+        end = high_resolution_clock::now();
+        duration_ = duration_cast<milliseconds>(end - start);
+        std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
 
         LOG("test");
 
