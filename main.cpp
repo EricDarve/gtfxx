@@ -351,8 +351,12 @@ struct Task_graph {
 
     // Find a task in the graph and return pointer
     Task * find_task(int3&);
+    // run task with index
+    void async(int3&);
+    // run with index and task
+    void async(int3&, Task*);
     // Is the task ready to run?
-    void isready_then_run(int3&, Task*);
+    void isready_then_async(int3&, Task*);
     // Decrement the dependency counter and run task if ready
     void decrement(int3 &);
 
@@ -396,30 +400,40 @@ Task * Task_graph::find_task(int3 & idx)
     return t_;
 }
 
-void Task_graph::isready_then_run(int3 & idx, Task * a_tsk)
+void Task_graph::async(int3 & idx, Task * a_tsk)
+{
+    LOG("run task " << idx[0] << " " << idx[1] << " " << idx[2]);
+
+    team->run(task_map(idx), a_tsk);
+
+    // Delete entry in graph
+    {
+        std::lock_guard<std::mutex> lck(mtx_graph);
+        assert(graph.find(idx) != graph.end());
+        graph.erase(idx);
+    }
+
+    // Test whether all tasks have been posted
+    if (decrement_alldone()) {
+        std::unique_lock<std::mutex> lck(mtx_done);
+        done = true;
+        cond_done.notify_one(); // Notify waiting thread
+    }
+}
+
+void Task_graph::async(int3 & idx)
+{
+    Task * t_ = find_task(idx);
+    async(idx, t_);
+}
+
+void Task_graph::isready_then_async(int3 & idx, Task * a_tsk)
 {
     assert(a_tsk != nullptr);
     assert(a_tsk->indegree.load() >= 0);
 
     if (a_tsk->indegree.load() == 0) { // task is ready to run
-
-        LOG("run task " << idx[0] << " " << idx[1] << " " << idx[2]);
-
-        team->run(task_map(idx), a_tsk);
-
-        // Delete entry in graph
-        {
-            std::lock_guard<std::mutex> lck(mtx_graph);
-            assert(graph.find(idx) != graph.end());
-            graph.erase(idx);
-        }
-
-        // Test whether all tasks have been posted
-        if (decrement_alldone()) {
-            std::unique_lock<std::mutex> lck(mtx_done);
-            done = true;
-            cond_done.notify_one(); // Notify waiting thread
-        }
+        async(idx, a_tsk);
     }
 }
 
@@ -430,7 +444,7 @@ void Task_graph::decrement(int3 & idx)
     // Decrement counter
     --( t_->indegree );
 
-    isready_then_run(idx, t_);
+    isready_then_async(idx, t_);
 }
 
 struct Block_matrix : vector<MatrixXd*> {
@@ -438,12 +452,14 @@ struct Block_matrix : vector<MatrixXd*> {
     Block_matrix() {};
     Block_matrix(int a_row, int a_col) : vector<MatrixXd*>(a_row*a_col),
         row(a_row), col(a_col) {};
+
     void resize(int a_row, int a_col)
     {
         vector<MatrixXd*>::resize(a_row*a_col);
         row = a_row;
         col = a_col;
     }
+
     MatrixXd* & operator()(int i, int j)
     {
         assert(i>=0 && i<row);
@@ -516,8 +532,7 @@ void Gemm_graph::start()
     for (int i=0; i<size_i; ++i) {
         for (int j=0; j<size_j; ++j) {
             int3 idx = {i,j,0};
-            Task * t_ = find_task(idx);
-            isready_then_run(idx, t_);
+            async(idx);
         }
     }
 }
@@ -688,7 +703,7 @@ void test()
 
         auto start = high_resolution_clock::now();
         auto C = A*B;
-        auto x = C(0,0);
+        printf("First entry in C: %g\n",C(0,0));
         auto end = high_resolution_clock::now();
         auto duration_ = duration_cast<milliseconds>(end - start);
         std::cout << "A*B elapsed: " << duration_.count() << "\n";
