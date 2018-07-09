@@ -129,9 +129,17 @@ struct Task : public Base_task {
 
     ~Task() {};
 
-    void operator=(Base_task a_tsk)
+    void operator=(Base_task a_f)
     {
-        Base_task::operator=(a_tsk);
+        Base_task::operator=(a_f);
+    }
+
+    void init(Base_task a_f, int a_wcount = 0, bool a_del = false, float a_priority = 0.0)
+    {
+        Base_task::operator=(a_f);
+        wait_count.store(a_wcount);
+        m_delete = a_del;
+        priority = a_priority;
     }
 };
 
@@ -345,6 +353,11 @@ struct Task_graph {
     bool quiescence = false;
     // boolean: all tasks have been posted and quiescence has been reached
 
+    Task_graph(Thread_team * a_team) : team(a_team)
+    {
+        assert(team != nullptr);
+    }
+
     virtual ~Task_graph() {};
 
     // How to initialize a task
@@ -468,6 +481,20 @@ struct Gemm_graph: public Task_graph {
     int size_k = -1;
     Block_matrix A, B, C;
 
+    Gemm_graph(Thread_team * a_team,
+               int a_sizei, int a_sizej, int a_sizek) :
+        Task_graph(a_team),
+        size_i(a_sizei), size_j(a_sizej), size_k(a_sizek)
+    {
+        assert(size_i > 0);
+        assert(size_j > 0);
+        assert(size_k > 0);
+
+        A.resize(size_i,size_k);
+        B.resize(size_k,size_j);
+        C.resize(size_i,size_j);
+    }
+
     void initialize_task(int3&, Task*);
 
     int task_map(int3 & idx)
@@ -502,14 +529,14 @@ void fun_gemm(Gemm_graph * m_g, int i, int j, int k)
 void Gemm_graph::initialize_task(int3 & idx, Task* a_tsk)
 {
     assert(a_tsk != nullptr);
-    if (idx[2] > 0) { // index k
-        a_tsk->wait_count.store(1);
+    int i_wait_count = 1;
+    if (idx[2] == 0) { // index k
+        i_wait_count = 0;
     }
-    else {
-        a_tsk->wait_count.store(0);
-    }
-    a_tsk->m_delete = true; // free memory after execution
-    (*a_tsk) = bind(fun_gemm,this,idx[0],idx[1],idx[2]);
+    a_tsk->init( bind(fun_gemm,this,idx[0],idx[1],idx[2]),
+                 i_wait_count, true );
+    // delete = true;
+    // -> free memory after execution
 }
 
 void Gemm_graph::start()
@@ -669,14 +696,11 @@ void test()
         }
     }
 
-    for (int i=0; i<100; ++i) {
+    {
+        const int nb = 2; // number of blocks
+        const int b = 256; // size of blocks
 
-        if (i%10 == 0) printf("i %d\n",i);
-
-        const int nb = 32; // number of blocks
-        const int b = 1; // size of blocks
-
-        const int n_thread = 2; // Number of threads to use
+        const int n_thread = 1; // Number of threads to use
 
         const int n = b*nb; // matrix size
 
@@ -705,13 +729,10 @@ void test()
 
         LOG("init");
 
-        Gemm_graph gemm_g;
-        gemm_g.size_i = nb;
-        gemm_g.size_j = nb;
-        gemm_g.size_k = nb;
-        gemm_g.A.resize(nb,nb);
-        gemm_g.B.resize(nb,nb);
-        gemm_g.C.resize(nb,nb);
+        // Create thread team
+        Thread_team team(n_thread);
+
+        Gemm_graph gemm_g(&team, nb, nb, nb);
 
         LOG("graph");
 
@@ -730,7 +751,6 @@ void test()
                 assert(*gemm_g.C(i,j) == MatrixXd::Zero(b,b));
             }
         }
-
 
         start = high_resolution_clock::now();
         // Calculate matrix product using blocks
@@ -779,11 +799,6 @@ void test()
             }
         }
 
-        // Create thread team
-        Thread_team team(n_thread);
-
-        gemm_g.team = &team;
-
         // Start team of threads
         team.start();
 
@@ -810,7 +825,7 @@ void test()
 
         end = high_resolution_clock::now();
         duration_ = duration_cast<milliseconds>(end - start);
-        //std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
+        std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
 
         LOG("test");
 
@@ -818,6 +833,14 @@ void test()
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
                 assert(*gemm_g.C(i,j) == C.block(i*b,j*b,b,b));
+            }
+        }
+
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j <nb; ++j) {
+                delete gemm_g.A(i,j);
+                delete gemm_g.B(i,j);
+                delete gemm_g.C(i,j);
             }
         }
     }
