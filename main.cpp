@@ -361,9 +361,6 @@ struct Task_graph {
     // spawn with index and task
     void async(int3, Task*);
 
-    // Is the task ready to run?
-    void isready_then_async(int3&, Task*);
-
     // Decrement the dependency counter and spawn task if ready
     void decrement_wait_count(int3);
 
@@ -430,16 +427,6 @@ void Task_graph::async(int3 idx)
     async(idx, t_);
 }
 
-void Task_graph::isready_then_async(int3 & idx, Task * a_tsk)
-{
-    assert(a_tsk != nullptr);
-    assert(a_tsk->wait_count.load() >= 0);
-
-    if (a_tsk->wait_count.load() == 0) { // task is ready to run
-        async(idx, a_tsk);
-    }
-}
-
 void Task_graph::decrement_wait_count(int3 idx)
 {
     Task * t_ = find_task(idx);
@@ -447,7 +434,11 @@ void Task_graph::decrement_wait_count(int3 idx)
     // Decrement counter
     --( t_->wait_count );
 
-    isready_then_async(idx, t_);
+    assert(t_->wait_count.load() >= 0);
+
+    if (t_->wait_count.load() == 0) { // task is ready to run
+        async(idx, t_);
+    }
 }
 
 struct Block_matrix : vector<MatrixXd*> {
@@ -678,11 +669,14 @@ void test()
         }
     }
 
-    {
-        const int nb = 4; // number of blocks
-        const int b = 32; // size of blocks
+    for (int i=0; i<100; ++i) {
 
-        const int n_thread = 4; // Number of threads to use
+        if (i%10 == 0) printf("i %d\n",i);
+
+        const int nb = 32; // number of blocks
+        const int b = 1; // size of blocks
+
+        const int n_thread = 2; // Number of threads to use
 
         const int n = b*nb; // matrix size
 
@@ -704,10 +698,10 @@ void test()
 
         auto start = high_resolution_clock::now();
         auto C = A*B;
-        printf("First entry in C: %g\n",C(0,0));
+        //printf("First entry in C: %g\n",C(0,0));
         auto end = high_resolution_clock::now();
         auto duration_ = duration_cast<milliseconds>(end - start);
-        std::cout << "A*B elapsed: " << duration_.count() << "\n";
+        //std::cout << "A*B elapsed: " << duration_.count() << "\n";
 
         LOG("init");
 
@@ -749,7 +743,7 @@ void test()
         }
         end = high_resolution_clock::now();
         duration_ = duration_cast<milliseconds>(end - start);
-        std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
+        //std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
 
         // First test
         for (int i=0; i<nb; ++i) {
@@ -816,7 +810,7 @@ void test()
 
         end = high_resolution_clock::now();
         duration_ = duration_cast<milliseconds>(end - start);
-        std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
+        //std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
 
         LOG("test");
 
