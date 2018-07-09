@@ -111,7 +111,7 @@ struct Fun_mv {
 };
 
 struct Task : public Base_task {
-    atomic_int indegree; // Number of incoming edges
+    atomic_int wait_count; // Number of incoming edges/tasks
 
     bool m_delete = false;
     // whether the object should be deleted after running the function
@@ -121,10 +121,10 @@ struct Task : public Base_task {
 
     Task() {}
 
-    Task(Base_task a_f, int a_indegree = 0, bool a_del = false, float a_priority = 0.0) :
+    Task(Base_task a_f, int a_wcount = 0, bool a_del = false, float a_priority = 0.0) :
         Base_task(a_f), m_delete(a_del), priority(a_priority)
     {
-        indegree.store(a_indegree);
+        wait_count.store(a_wcount);
     }
 
     ~Task() {};
@@ -170,7 +170,7 @@ struct Thread_prio {
     };
 
     // Add new task to queue
-    void run(Task * a_t)
+    void spawn(Task * a_t)
     {
         LOG(m_id);
         std::lock_guard<std::mutex> lck(mtx);
@@ -227,16 +227,18 @@ struct Thread_team : public vector<Thread_prio*> {
     {
         for (auto& th : v_thread) th.start();
     }
+
     void stop()
     {
         for (auto& th : v_thread) th.stop();
     }
+
     void join()
     {
         for (auto& th : v_thread) th.join();
     }
 
-    void run(const int a_id, Task * a_task)
+    void spawn(const int a_id, Task * a_task)
     {
         assert(a_id >= 0 && static_cast<unsigned long>(a_id) < v_thread.size());
         int id_ = a_id;
@@ -255,7 +257,7 @@ struct Thread_team : public vector<Thread_prio*> {
         LOG("requested thread: " << a_id << " got " << id_);
         // Note that because we are not using locks, the queue may no longer be empty.
         // But this implementation is more efficient than using locks.
-        v_thread[id_].run(a_task);
+        v_thread[id_].spawn(a_task);
     }
 
     void steal(unsigned short a_id)
@@ -270,7 +272,7 @@ struct Thread_team : public vector<Thread_prio*> {
                     Task * tsk = thread_.pop();
                     lck.unlock();
                     LOG(a_id << " from " << j);
-                    v_thread[a_id].run(tsk);
+                    v_thread[a_id].spawn(tsk);
                     break;
                 }
             }
@@ -336,44 +338,40 @@ struct Task_graph {
     Thread_team * team = nullptr;
 
     unordered_map< int3, Task*, hash_array::hash > graph;
-    mutex mtx_graph, mtx_done;
-    atomic_int n_tasks;
-    std::condition_variable cond_done;
+    mutex mtx_graph, mtx_quiescence;
+    atomic_int n_active_task;
+    std::condition_variable cond_quiescence;
 
-    bool done = false; // boolean: all tasks have been posted
+    bool quiescence = false;
+    // boolean: all tasks have been posted and quiescence has been reached
 
     virtual ~Task_graph() {};
 
     // How to initialize a task
     virtual void initialize_task(int3&,Task*) = 0;
+
     // Mapping from int3 task index to thread id
-    virtual int task_map(int3 & idx) = 0;
+    virtual int task_map(int3&) = 0;
 
     // Find a task in the graph and return pointer
     Task * find_task(int3&);
-    // run task with index
-    void async(int3&);
-    // run with index and task
-    void async(int3&, Task*);
+
+    // spawn task with index
+    void async(int3);
+    // spawn with index and task
+    void async(int3, Task*);
+
     // Is the task ready to run?
     void isready_then_async(int3&, Task*);
-    // Decrement the dependency counter and run task if ready
-    void decrement(int3 &);
+
+    // Decrement the dependency counter and spawn task if ready
+    void decrement_wait_count(int3);
 
     // Returns when all tasks have been posted
     void wait()
     {
-        std::unique_lock<std::mutex> lck(mtx_done);
-        while (!done) cond_done.wait(lck);
-    }
-
-    // Decrement task counter by 1; return true when all tasks have been posted
-    bool decrement_alldone()
-    {
-        --n_tasks;
-        LOG(n_tasks.load());
-        assert(n_tasks.load() >= 0);
-        return (n_tasks.load() == 0);
+        std::unique_lock<std::mutex> lck(mtx_quiescence);
+        while (!quiescence) cond_quiescence.wait(lck);
     }
 };
 
@@ -393,6 +391,7 @@ Task * Task_graph::find_task(int3 & idx)
         t_ = new Task;
         graph[idx] = t_; // Insert in graph
         initialize_task(idx,t_);
+        ++ n_active_task; // Increment counter
     }
 
     assert(t_ != nullptr);
@@ -400,11 +399,11 @@ Task * Task_graph::find_task(int3 & idx)
     return t_;
 }
 
-void Task_graph::async(int3 & idx, Task * a_tsk)
+void Task_graph::async(int3 idx, Task * a_tsk)
 {
-    LOG("run task " << idx[0] << " " << idx[1] << " " << idx[2]);
+    LOG("spawn task " << idx[0] << " " << idx[1] << " " << idx[2]);
 
-    team->run(task_map(idx), a_tsk);
+    team->spawn(task_map(idx), a_tsk);
 
     // Delete entry in graph
     {
@@ -413,15 +412,19 @@ void Task_graph::async(int3 & idx, Task * a_tsk)
         graph.erase(idx);
     }
 
-    // Test whether all tasks have been posted
-    if (decrement_alldone()) {
-        std::unique_lock<std::mutex> lck(mtx_done);
-        done = true;
-        cond_done.notify_one(); // Notify waiting thread
+    -- n_active_task; // Decrement counter
+
+    assert(n_active_task.load() >= 0);
+
+    // Signal if quiescence has been reached
+    if (n_active_task.load() == 0) {
+        std::unique_lock<std::mutex> lck(mtx_quiescence);
+        quiescence = true;
+        cond_quiescence.notify_one(); // Notify waiting thread
     }
 }
 
-void Task_graph::async(int3 & idx)
+void Task_graph::async(int3 idx)
 {
     Task * t_ = find_task(idx);
     async(idx, t_);
@@ -430,19 +433,19 @@ void Task_graph::async(int3 & idx)
 void Task_graph::isready_then_async(int3 & idx, Task * a_tsk)
 {
     assert(a_tsk != nullptr);
-    assert(a_tsk->indegree.load() >= 0);
+    assert(a_tsk->wait_count.load() >= 0);
 
-    if (a_tsk->indegree.load() == 0) { // task is ready to run
+    if (a_tsk->wait_count.load() == 0) { // task is ready to run
         async(idx, a_tsk);
     }
 }
 
-void Task_graph::decrement(int3 & idx)
+void Task_graph::decrement_wait_count(int3 idx)
 {
     Task * t_ = find_task(idx);
 
     // Decrement counter
-    --( t_->indegree );
+    --( t_->wait_count );
 
     isready_then_async(idx, t_);
 }
@@ -484,11 +487,6 @@ struct Gemm_graph: public Task_graph {
     void start();
 };
 
-void run_gemm(MatrixXd *A, MatrixXd *B, MatrixXd *C)
-{
-    *C += (*A) * (*B);
-}
-
 void fun_gemm(Gemm_graph * m_g, int i, int j, int k)
 {
     assert(i>=0 && i<m_g->size_i);
@@ -496,12 +494,17 @@ void fun_gemm(Gemm_graph * m_g, int i, int j, int k)
     assert(k>=0 && k<m_g->size_k);
     LOG(i << " " << j << " " << k);
 
-    run_gemm(m_g->A(i,k), m_g->B(k,j), m_g->C(i,j));
+    // GEMM calculation
+    {
+        MatrixXd & A = *(m_g->A(i,k));
+        MatrixXd & B = *(m_g->B(k,j));
+        MatrixXd & C = *(m_g->C(i,j));
+        C += A*B;
+    }
 
     if (k < m_g->size_k - 1) {
         // Release dependency on the next task
-        int3 idx = {i,j,k+1};
-        m_g->decrement(idx);
+        m_g->decrement_wait_count({i,j,k+1});
     }
 }
 
@@ -509,12 +512,12 @@ void Gemm_graph::initialize_task(int3 & idx, Task* a_tsk)
 {
     assert(a_tsk != nullptr);
     if (idx[2] > 0) { // index k
-        a_tsk->indegree.store(1);
+        a_tsk->wait_count.store(1);
     }
     else {
-        a_tsk->indegree.store(0);
+        a_tsk->wait_count.store(0);
     }
-    a_tsk->m_delete = true; // delete memory after execution
+    a_tsk->m_delete = true; // free memory after execution
     (*a_tsk) = bind(fun_gemm,this,idx[0],idx[1],idx[2]);
 }
 
@@ -526,13 +529,13 @@ void Gemm_graph::start()
     assert(A.size() == static_cast<unsigned long>(size_i*size_k));
     assert(B.size() == static_cast<unsigned long>(size_k*size_j));
     assert(C.size() == static_cast<unsigned long>(size_i*size_j));
-    assert(n_tasks.load() == size_i*size_j*size_k);
     assert(team != nullptr);
+
+    n_active_task.store(0); // Active task counter
 
     for (int i=0; i<size_i; ++i) {
         for (int j=0; j<size_j; ++j) {
-            int3 idx = {i,j,0};
-            async(idx);
+            async({i,j,0});
         }
     }
 }
@@ -557,10 +560,10 @@ void test()
 
     {
         Task t1( f_1 );
-        assert(t1.indegree.load() == 0);
+        assert(t1.wait_count.load() == 0);
 
         Task t2( f_2, 4 );
-        assert(t2.indegree.load() == 4);
+        assert(t2.wait_count.load() == 4);
 
         t1();
         t2();
@@ -602,7 +605,6 @@ void test()
         assert(y(1) == 2);
     }
 
-#if 0
     {
         const int n_thread = 4;
         const int max_count = 10;
@@ -630,7 +632,7 @@ void test()
 #endif
             for(int it=0; it < max_count; ++it) {
                 for(int nt=0; nt<n_thread; ++nt) {
-                    team.run(0, &tsk[nt]);
+                    team.spawn(0, &tsk[nt]);
                 }
             }
             team.join();
@@ -656,7 +658,7 @@ void test()
 #endif
             for(int it=0; it < max_count; ++it) {
                 for(int nt=0; nt<n_thread; ++nt) {
-                    team.run(nt, &tsk[nt]);
+                    team.spawn(nt, &tsk[nt]);
                 }
             }
             team.join();
@@ -675,11 +677,10 @@ void test()
             assert(counter[nt].load() == max_count);
         }
     }
-#endif
 
     {
         const int nb = 4; // number of blocks
-        const int b = 128; // size of blocks
+        const int b = 32; // size of blocks
 
         const int n_thread = 4; // Number of threads to use
 
@@ -717,7 +718,6 @@ void test()
         gemm_g.A.resize(nb,nb);
         gemm_g.B.resize(nb,nb);
         gemm_g.C.resize(nb,nb);
-        gemm_g.n_tasks.store(nb*nb*nb);
 
         LOG("graph");
 
