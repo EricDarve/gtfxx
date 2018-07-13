@@ -111,7 +111,7 @@ struct Fun_mv {
 };
 
 struct Task : public Base_task {
-    atomic_int wait_count; // Number of incoming edges/tasks
+    atomic_int m_wait_count; // Number of incoming edges/tasks
 
     bool m_delete = false;
     // whether the object should be deleted after running the function
@@ -124,7 +124,7 @@ struct Task : public Base_task {
     Task(Base_task a_f, int a_wcount = 0, bool a_del = false, float a_priority = 0.0) :
         Base_task(a_f), m_delete(a_del), priority(a_priority)
     {
-        wait_count.store(a_wcount);
+        m_wait_count.store(a_wcount);
     }
 
     ~Task() {};
@@ -137,7 +137,7 @@ struct Task : public Base_task {
     void init(Base_task a_f, int a_wcount = 0, bool a_del = false, float a_priority = 0.0)
     {
         Base_task::operator=(a_f);
-        wait_count.store(a_wcount);
+        m_wait_count.store(a_wcount);
         m_delete = a_del;
         priority = a_priority;
     }
@@ -342,29 +342,37 @@ struct hash {
 
 typedef array<int,3> int3;
 
-struct Task_graph {
+struct Task_flow {
+
+    typedef std::function<void(Task_flow*,int3&,Task*)> Init_task;
+    typedef std::function<int(int3&)> Map_task;
+
     Thread_team * team = nullptr;
 
+    // How to initialize a task
+    Init_task m_init;
+
+    // Mapping from task index to thread id
+    Map_task m_map;
+
     unordered_map< int3, Task*, hash_array::hash > graph;
+
     mutex mtx_graph, mtx_quiescence;
-    atomic_int n_active_task;
     std::condition_variable cond_quiescence;
 
     bool quiescence = false;
     // boolean: all tasks have been posted and quiescence has been reached
 
-    Task_graph(Thread_team * a_team) : team(a_team)
+    int n_active_task = 0;
+
+    Task_flow(Thread_team * a_team,
+              Init_task a_init, Map_task a_map) :
+        team(a_team), m_init(a_init), m_map(a_map)
     {
         assert(team != nullptr);
     }
 
-    virtual ~Task_graph() {};
-
-    // How to initialize a task
-    virtual void initialize_task(int3&,Task*) = 0;
-
-    // Mapping from int3 task index to thread id
-    virtual int task_map(int3&) = 0;
+    virtual ~Task_flow() {};
 
     // Find a task in the graph and return pointer
     Task * find_task(int3&);
@@ -385,11 +393,12 @@ struct Task_graph {
     }
 };
 
-Task * Task_graph::find_task(int3 & idx)
+Task * Task_flow::find_task(int3 & idx)
 {
     Task * t_ = nullptr;
 
-    std::lock_guard<std::mutex> lck(mtx_graph);
+    std::unique_lock<std::mutex> lck(mtx_graph);
+
     auto tsk = graph.find(idx);
 
     // Task exists
@@ -400,56 +409,57 @@ Task * Task_graph::find_task(int3 & idx)
         // Task does not exist; create it
         t_ = new Task;
         graph[idx] = t_; // Insert in graph
-        initialize_task(idx,t_);
-        ++ n_active_task; // Increment counter
+
+        m_init(this,idx,t_); // Initialize
+
+        ++n_active_task; // Increment counter
     }
+
+    lck.unlock();
 
     assert(t_ != nullptr);
 
     return t_;
 }
 
-void Task_graph::async(int3 idx, Task * a_tsk)
+void Task_flow::async(int3 idx, Task * a_tsk)
 {
-    LOG("spawn task " << idx[0] << " " << idx[1] << " " << idx[2]);
-
-    team->spawn(task_map(idx), a_tsk);
+    team->spawn(/* task map */ m_map(idx), a_tsk);
 
     // Delete entry in graph
-    {
-        std::lock_guard<std::mutex> lck(mtx_graph);
-        assert(graph.find(idx) != graph.end());
-        graph.erase(idx);
-    }
+    std::unique_lock<std::mutex> lck(mtx_graph);
+
+    assert(graph.find(idx) != graph.end());
+    graph.erase(idx);
 
     -- n_active_task; // Decrement counter
-
-    assert(n_active_task.load() >= 0);
+    assert(n_active_task >= 0);
 
     // Signal if quiescence has been reached
-    if (n_active_task.load() == 0) {
+    if (n_active_task == 0) {
+        lck.unlock();
         std::unique_lock<std::mutex> lck(mtx_quiescence);
         quiescence = true;
         cond_quiescence.notify_one(); // Notify waiting thread
     }
 }
 
-void Task_graph::async(int3 idx)
+void Task_flow::async(int3 idx)
 {
     Task * t_ = find_task(idx);
     async(idx, t_);
 }
 
-void Task_graph::decrement_wait_count(int3 idx)
+void Task_flow::decrement_wait_count(int3 idx)
 {
     Task * t_ = find_task(idx);
 
     // Decrement counter
-    --( t_->wait_count );
+    --( t_->m_wait_count );
 
-    assert(t_->wait_count.load() >= 0);
+    assert(t_->m_wait_count.load() >= 0);
 
-    if (t_->wait_count.load() == 0) { // task is ready to run
+    if (t_->m_wait_count.load() == 0) { // task is ready to run
         async(idx, t_);
     }
 }
@@ -475,89 +485,6 @@ struct Block_matrix : vector<MatrixXd*> {
     }
 };
 
-struct Gemm_graph: public Task_graph {
-    int size_i = -1;
-    int size_j = -1;
-    int size_k = -1;
-    Block_matrix A, B, C;
-
-    Gemm_graph(Thread_team * a_team,
-               int a_sizei, int a_sizej, int a_sizek) :
-        Task_graph(a_team),
-        size_i(a_sizei), size_j(a_sizej), size_k(a_sizek)
-    {
-        assert(size_i > 0);
-        assert(size_j > 0);
-        assert(size_k > 0);
-
-        A.resize(size_i,size_k);
-        B.resize(size_k,size_j);
-        C.resize(size_i,size_j);
-    }
-
-    void initialize_task(int3&, Task*);
-
-    int task_map(int3 & idx)
-    {
-        return ( ( idx[0] + size_i * idx[1] ) % ( team->v_thread.size() ) );
-    }
-
-    void start();
-};
-
-void fun_gemm(Gemm_graph * m_g, int i, int j, int k)
-{
-    assert(i>=0 && i<m_g->size_i);
-    assert(j>=0 && j<m_g->size_j);
-    assert(k>=0 && k<m_g->size_k);
-    LOG(i << " " << j << " " << k);
-
-    // GEMM calculation
-    {
-        MatrixXd & A = *(m_g->A(i,k));
-        MatrixXd & B = *(m_g->B(k,j));
-        MatrixXd & C = *(m_g->C(i,j));
-        C += A*B;
-    }
-
-    if (k < m_g->size_k - 1) {
-        // Release dependency on the next task
-        m_g->decrement_wait_count({i,j,k+1});
-    }
-}
-
-void Gemm_graph::initialize_task(int3 & idx, Task* a_tsk)
-{
-    assert(a_tsk != nullptr);
-    int i_wait_count = 1;
-    if (idx[2] == 0) { // index k
-        i_wait_count = 0;
-    }
-    a_tsk->init( bind(fun_gemm,this,idx[0],idx[1],idx[2]),
-                 i_wait_count, true );
-    // delete = true;
-    // -> free memory after execution
-}
-
-void Gemm_graph::start()
-{
-    assert(size_i>0);
-    assert(size_j>0);
-    assert(size_k>0);
-    assert(A.size() == static_cast<unsigned long>(size_i*size_k));
-    assert(B.size() == static_cast<unsigned long>(size_k*size_j));
-    assert(C.size() == static_cast<unsigned long>(size_i*size_j));
-    assert(team != nullptr);
-
-    n_active_task.store(0); // Active task counter
-
-    for (int i=0; i<size_i; ++i) {
-        for (int j=0; j<size_j; ++j) {
-            async({i,j,0});
-        }
-    }
-}
-
 void test();
 
 int main(void)
@@ -578,10 +505,10 @@ void test()
 
     {
         Task t1( f_1 );
-        assert(t1.wait_count.load() == 0);
+        assert(t1.m_wait_count.load() == 0);
 
         Task t2( f_2, 4 );
-        assert(t2.wait_count.load() == 4);
+        assert(t2.m_wait_count.load() == 4);
 
         t1();
         t2();
@@ -697,16 +624,14 @@ void test()
     }
 
     {
-        const int nb = 2; // number of blocks
-        const int b = 256; // size of blocks
+        const int nb = 64; // number of blocks
+        const int b = 1;  // size of blocks
 
-        const int n_thread = 1; // Number of threads to use
+        const int n_thread = 4; // number of threads to use
 
         const int n = b*nb; // matrix size
 
         MatrixXd A(n,n), B(n,n);
-
-        LOG("matrix");
 
         // Initialize GEMM matrices
         std::mt19937 mers_rand;
@@ -727,28 +652,21 @@ void test()
         auto duration_ = duration_cast<milliseconds>(end - start);
         //std::cout << "A*B elapsed: " << duration_.count() << "\n";
 
-        LOG("init");
-
-        // Create thread team
-        Thread_team team(n_thread);
-
-        Gemm_graph gemm_g(&team, nb, nb, nb);
-
-        LOG("graph");
+        Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
 
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
-                gemm_g.A(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
-                gemm_g.B(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
-                gemm_g.C(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
+                Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
+                Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
+                Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
             }
         }
 
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
-                assert(*gemm_g.A(i,j) == A.block(i*b,j*b,b,b));
-                assert(*gemm_g.B(i,j) == B.block(i*b,j*b,b,b));
-                assert(*gemm_g.C(i,j) == MatrixXd::Zero(b,b));
+                assert(*(Ab(i,j)) == A.block(i*b,j*b,b,b));
+                assert(*(Bb(i,j)) == B.block(i*b,j*b,b,b));
+                assert(*(Cb(i,j)) == MatrixXd::Zero(b,b));
             }
         }
 
@@ -757,7 +675,7 @@ void test()
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
                 for (int k=0; k <nb; ++k) {
-                    *(gemm_g.C(i,j)) += *(gemm_g.A(i,k)) * *(gemm_g.B(k,j));
+                    *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j));
                 }
             }
         }
@@ -768,7 +686,7 @@ void test()
         // First test
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
-                assert(*gemm_g.C(i,j) == C.block(i*b,j*b,b,b));
+                assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
             }
         }
 
@@ -776,7 +694,7 @@ void test()
         MatrixXd C0(n,n);
         for (int i=0; i<nb; ++i) {
             for (int j=0; j<nb; ++j) {
-                MatrixXd & M = *(gemm_g.C(i,j));
+                MatrixXd & M = *(Cb(i,j));
                 for (int i0=0; i0<b; ++i0) {
                     for (int j0=0; j0<b; ++j0) {
                         C0(i0+b*i,j0+b*j) = M(i0,j0);
@@ -785,19 +703,46 @@ void test()
             }
         }
 
-        LOG("graph_init");
-
         // Second test
         assert(C == C0);
-
-        // Re-doing calculation using task graph
 
         // Init C
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
-                *(gemm_g.C(i,j)) = MatrixXd::Zero(b,b);
+                *(Cb(i,j)) = MatrixXd::Zero(b,b);
             }
         }
+
+        // Re-doing calculation using task graph
+
+        // Task to run
+        auto fun_gemm = [&] (Task_flow * a_tg, int i, int j, int k) {
+            *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
+
+            // Release dependency on the next task
+            if (k < nb - 1) {
+                a_tg->decrement_wait_count({i,j,k+1});
+            }
+        };
+
+        // Task initialization
+        auto l_task_gemm = [=] (Task_flow * a_tg, int3 & idx, Task* a_tsk) {
+            int wait_count = ( idx[2] == 0 ? 0 : 1); // index k
+            a_tsk->init( bind(fun_gemm,a_tg,idx[0],idx[1],idx[2]),
+                         wait_count, /*delete=*/ true );
+            // Free memory after task is run
+        };
+
+        // Mapping to task index to thread ID
+        auto l_map = [=] (int3& idx) -> int {
+            return ( ( idx[0] + nb * idx[1] ) % n_thread );
+        };
+
+        // Create thread team
+        Thread_team team(n_thread);
+
+        // Task flow
+        Task_flow gemm_g(&team, l_task_gemm, l_map);
 
         // Start team of threads
         team.start();
@@ -807,15 +752,16 @@ void test()
 #endif
         start = high_resolution_clock::now();
 
-        LOG("start");
         // Create seed tasks in graph and start
-        gemm_g.start();
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j<nb; ++j) {
+                gemm_g.async({i,j,0});
+            }
+        }
 
-        LOG("wait");
         // Wait for all tasks to be posted
         gemm_g.wait();
 
-        LOG("join");
         // Wait for end of task queue execution
         team.join();
 
@@ -827,20 +773,18 @@ void test()
         duration_ = duration_cast<milliseconds>(end - start);
         std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
 
-        LOG("test");
-
         // Test output
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
-                assert(*gemm_g.C(i,j) == C.block(i*b,j*b,b,b));
+                assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
             }
         }
 
         for (int i=0; i<nb; ++i) {
             for (int j=0; j <nb; ++j) {
-                delete gemm_g.A(i,j);
-                delete gemm_g.B(i,j);
-                delete gemm_g.C(i,j);
+                delete Ab(i,j);
+                delete Bb(i,j);
+                delete Cb(i,j);
             }
         }
     }
