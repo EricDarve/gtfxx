@@ -111,13 +111,15 @@ struct Fun_mv {
 };
 
 struct Task : public Base_task {
-    atomic_int m_wait_count; // Number of incoming edges/tasks
+    int m_wait_count; // Number of incoming edges/tasks
 
     float priority = 0.0; // task priority
 
     bool m_delete = true;
     // whether the object should be deleted after running the function
     // to completion.
+
+    mutex mtx; // Protects concurrent access to m_wait_count
 
     Task() {}
 
@@ -130,7 +132,7 @@ struct Task : public Base_task {
     void init(Base_task a_f, int a_wcount = 0, float a_priority = 0.0, bool a_del = true)
     {
         Base_task::operator=(a_f);
-        m_wait_count.store(a_wcount);
+        m_wait_count = a_wcount;
         priority = a_priority;
         m_delete = a_del;
     }
@@ -473,11 +475,12 @@ void Task_flow::decrement_wait_count(int3 idx)
     Task * t_ = find_task(idx);
 
     // Decrement counter
-    --( t_->m_wait_count );
+    std::unique_lock<std::mutex> lck(t_->mtx);
+    --(t_->m_wait_count);
+    assert(t_->m_wait_count >= 0);
 
-    assert(t_->m_wait_count.load() >= 0);
-
-    if (t_->m_wait_count.load() == 0) { // task is ready to run
+    if (t_->m_wait_count == 0) { // task is ready to run
+        lck.unlock();
         async(idx, t_);
     }
 }
@@ -523,10 +526,10 @@ void test()
 
     {
         Task t1( f_1 );
-        assert(t1.m_wait_count.load() == 0);
+        assert(t1.m_wait_count == 0);
 
         Task t2( f_2, 4 );
-        assert(t2.m_wait_count.load() == 4);
+        assert(t2.m_wait_count == 4);
 
         t1();
         t2();
@@ -637,10 +640,10 @@ void test()
     }
 
     {
-        const int nb = 4; // number of blocks
-        const int b = 256;  // size of blocks
+        const int nb = 32; // number of blocks
+        const int b = 1;  // size of blocks
 
-        const int n_thread = 4; // number of threads to use
+        const int n_thread = 128; // number of threads to use
 
         const int n = b*nb; // matrix size
 
