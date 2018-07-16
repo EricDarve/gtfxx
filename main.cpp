@@ -667,152 +667,165 @@ void test()
         auto duration_ = duration_cast<milliseconds>(end - start);
         std::cout << "A*B elapsed: " << duration_.count() << "\n";
 
-        Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
+        {
+            Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
 
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
-                Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
-                Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
-            }
-        }
-
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                assert(*(Ab(i,j)) == A.block(i*b,j*b,b,b));
-                assert(*(Bb(i,j)) == B.block(i*b,j*b,b,b));
-                assert(*(Cb(i,j)) == MatrixXd::Zero(b,b));
-            }
-        }
-
-        start = high_resolution_clock::now();
-        // Calculate matrix product using blocks
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                for (int k=0; k <nb; ++k) {
-                    *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j));
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
+                    Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
+                    Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
                 }
             }
-        }
-        end = high_resolution_clock::now();
-        duration_ = duration_cast<milliseconds>(end - start);
-        std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
 
-        // First test
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    assert(*(Ab(i,j)) == A.block(i*b,j*b,b,b));
+                    assert(*(Bb(i,j)) == B.block(i*b,j*b,b,b));
+                    assert(*(Cb(i,j)) == MatrixXd::Zero(b,b));
+                }
             }
-        }
 
-        // Copy back for testing purposes
-        MatrixXd C0(n,n);
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j<nb; ++j) {
-                MatrixXd & M = *(Cb(i,j));
-                for (int i0=0; i0<b; ++i0) {
-                    for (int j0=0; j0<b; ++j0) {
-                        C0(i0+b*i,j0+b*j) = M(i0,j0);
+            start = high_resolution_clock::now();
+            // Calculate matrix product using blocks
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    for (int k=0; k <nb; ++k) {
+                        *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j));
                     }
                 }
             }
-        }
+            end = high_resolution_clock::now();
+            duration_ = duration_cast<milliseconds>(end - start);
+            std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
 
-        // Second test
-        assert(C == C0);
+            // First test
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
+                }
+            }
+
+            // Copy back for testing purposes
+            MatrixXd C0(n,n);
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j<nb; ++j) {
+                    MatrixXd & M = *(Cb(i,j));
+                    for (int i0=0; i0<b; ++i0) {
+                        for (int j0=0; j0<b; ++j0) {
+                            C0(i0+b*i,j0+b*j) = M(i0,j0);
+                        }
+                    }
+                }
+            }
+
+            // Second test
+            assert(C == C0);
+
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    delete Ab(i,j);
+                    delete Bb(i,j);
+                    delete Cb(i,j);
+                }
+            }
+        }
 
         // Re-doing calculation using task task_map
+        {
 
-        // Create thread team
-        Thread_team team(n_thread);
+            Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
 
-        // Task flow context
-        struct Context {
-            Task_flow init_mat;
-            Task_flow gemm_g;
-            Context(Thread_team* a_tt) : init_mat(a_tt), gemm_g(a_tt) {}
-        } ctx(&team);
+            // Create thread team
+            Thread_team team(n_thread);
 
-        // Init task
-        auto l_init = [&] (int i, int j) {
-            *(Ab(i,j)) = A.block(i*b,j*b,b,b);
-            *(Bb(i,j)) = B.block(i*b,j*b,b,b);
-            *(Cb(i,j)) = MatrixXd::Zero(b,b);
-            for (int k=0; k<nb; ++k) {
-                ctx.gemm_g.decrement_wait_count({i,k,0});
-                ctx.gemm_g.decrement_wait_count({k,j,0});
-            }
-        };
+            // Task flow context
+            struct Context {
+                Task_flow init_mat;
+                Task_flow gemm_g;
+                Context(Thread_team* a_tt) : init_mat(a_tt), gemm_g(a_tt) {}
+            } ctx(&team);
 
-        ctx.init_mat = task_flow_init()
-        .task_init( [=] (int3& idx, Task* a_tsk) {
-            a_tsk->init( bind(l_init,idx[0],idx[1]),
-                         /*wait_count*/  0);
-        })
-        .compute_on([=] (int3& idx) {
-            return ( ( idx[0] + nb * idx[1] ) % n_thread );
-        });
+            auto compute_on_ij = [=] (int3& idx) {
+                return ( ( idx[0] + nb * idx[1] ) % n_thread );
+            };
 
-        // GEMM task
-        auto l_gemm = [&] (int i, int j, int k) {
-            *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
-            if (k < nb - 1) {
-                ctx.gemm_g.decrement_wait_count({i,j,k+1});
-            }
-        };
+            // Init task flow
+            ctx.init_mat = task_flow_init()
+            .task_init([=,&ctx,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) {
+                int i = idx[0];
+                int j = idx[1];
+                a_tsk->init([=,&ctx,&Ab,&Bb,&Cb] () {
+                    Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
+                    Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
+                    Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
+                    for (int k=0; k<nb; ++k) {
+                        ctx.gemm_g.decrement_wait_count({i,k,0});
+                        ctx.gemm_g.decrement_wait_count({k,j,0});
+                    }
+                },
+                /*wait_count*/  0);
+            })
+            .compute_on(compute_on_ij);
 
-        auto l_gemm_wait_count = [&] (int k) {
-            return ( k == 0 ? 2*nb : 1);
-        };
+            // GEMM task flow
+            ctx.gemm_g = task_flow_init()
+            .task_init([=,&ctx,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) {
+                int wait_count = (/*k*/ idx[2] == 0 ? 2*nb : 1);
 
-        ctx.gemm_g = task_flow_init()
-        .task_init( [=] (int3& idx, Task* a_tsk) {
-            int wait_count = l_gemm_wait_count(/*k*/ idx[2]);
-            a_tsk->init( bind(l_gemm,idx[0],idx[1],idx[2]),
-                         wait_count);
-        })
-        .compute_on([=] (int3& idx) {
-            return ( ( idx[0] + nb * idx[1] ) % n_thread );
-        });
+                int i = idx[0];
+                int j = idx[1];
+                int k = idx[2];
 
-        // Start team of threads
-        team.start();
+                a_tsk->init([=,&ctx,&Ab,&Bb,&Cb] () {
+                    *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
+                    if (k < nb - 1) {
+                        ctx.gemm_g.decrement_wait_count({i,j,k+1});
+                    }
+                },
+                wait_count);
+            })
+            .compute_on(compute_on_ij);
 
-#ifdef PROFILER
-        ProfilerStart("ctxx.pprof");
-#endif
-        start = high_resolution_clock::now();
-
-        // Create seed tasks and start
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j<nb; ++j) {
-                ctx.init_mat.async({i,j,0});
-            }
-        }
-
-        // Wait for end of task queue execution
-        team.join();
+            // Start team of threads
+            team.start();
 
 #ifdef PROFILER
-        ProfilerStop();
+            ProfilerStart("ctxx.pprof");
+#endif
+            start = high_resolution_clock::now();
+
+            // Create seed tasks and start
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j<nb; ++j) {
+                    ctx.init_mat.async({i,j,0});
+                }
+            }
+
+            // Wait for end of task queue execution
+            team.join();
+
+#ifdef PROFILER
+            ProfilerStop();
 #endif
 
-        end = high_resolution_clock::now();
-        duration_ = duration_cast<milliseconds>(end - start);
-        std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
+            end = high_resolution_clock::now();
+            duration_ = duration_cast<milliseconds>(end - start);
+            std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
 
-        // Test output
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
+            // Test output
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
+                }
             }
-        }
 
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                delete Ab(i,j);
-                delete Bb(i,j);
-                delete Cb(i,j);
+            for (int i=0; i<nb; ++i) {
+                for (int j=0; j <nb; ++j) {
+                    delete Ab(i,j);
+                    delete Bb(i,j);
+                    delete Cb(i,j);
+                }
             }
         }
     }
