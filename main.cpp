@@ -113,33 +113,31 @@ struct Fun_mv {
 struct Task : public Base_task {
     atomic_int m_wait_count; // Number of incoming edges/tasks
 
-    bool m_delete = false;
+    float priority = 0.0; // task priority
+
+    bool m_delete = true;
     // whether the object should be deleted after running the function
     // to completion.
 
-    float priority = 0.0; // task priority
-
     Task() {}
 
-    Task(Base_task a_f, int a_wcount = 0, bool a_del = false, float a_priority = 0.0) :
-        Base_task(a_f), m_delete(a_del), priority(a_priority)
-    {
-        m_wait_count.store(a_wcount);
-    }
+    Task(Base_task a_f, int a_wcount = 0, float a_priority = 0.0, bool a_del = true) :
+        Base_task(a_f), m_wait_count(a_wcount), priority(a_priority), m_delete(a_del)
+    {}
 
     ~Task() {};
+
+    void init(Base_task a_f, int a_wcount = 0, float a_priority = 0.0, bool a_del = true)
+    {
+        Base_task::operator=(a_f);
+        m_wait_count.store(a_wcount);
+        priority = a_priority;
+        m_delete = a_del;
+    }
 
     void operator=(Base_task a_f)
     {
         Base_task::operator=(a_f);
-    }
-
-    void init(Base_task a_f, int a_wcount = 0, bool a_del = false, float a_priority = 0.0)
-    {
-        Base_task::operator=(a_f);
-        m_wait_count.store(a_wcount);
-        m_delete = a_del;
-        priority = a_priority;
     }
 };
 
@@ -344,37 +342,52 @@ typedef array<int,3> int3;
 
 struct Task_flow {
 
-    typedef std::function<void(Task_flow*,int3&,Task*)> Init_task;
+    typedef std::function<void(int3&,Task*)> Init_task;
     typedef std::function<int(int3&)> Map_task;
 
     Thread_team * team = nullptr;
 
-    // How to initialize a task
-    Init_task m_init;
+    struct Init {
+        // How to initialize a task
+        Init_task init;
+        // Mapping from task index to thread id
+        Map_task map;
 
-    // Mapping from task index to thread id
-    Map_task m_map;
+        Init& task_init(Init_task a_init)
+        {
+            init = a_init;
+            return *this;
+        }
 
-    unordered_map< int3, Task*, hash_array::hash > graph;
+        Init& compute_on(Map_task a_map)
+        {
+            map = a_map;
+            return *this;
+        }
+    } m_task;
+
+    Task_flow& operator=(Init & a_setup)
+    {
+        m_task.init = a_setup.init;
+        m_task.map = a_setup.map;
+        return *this;
+    }
+
+    unordered_map< int3, Task*, hash_array::hash > task_map;
 
     mutex mtx_graph, mtx_quiescence;
     std::condition_variable cond_quiescence;
 
     bool quiescence = false;
-    // boolean: all tasks have been posted and quiescence has been reached
+    // true = all tasks have been posted and quiescence has been reached
 
-    int n_active_task = 0;
+    int n_task_in_graph = 0;
 
-    Task_flow(Thread_team * a_team,
-              Init_task a_init, Map_task a_map) :
-        team(a_team), m_init(a_init), m_map(a_map)
-    {
-        assert(team != nullptr);
-    }
+    Task_flow(Thread_team * a_team) : team(a_team) {}
 
-    virtual ~Task_flow() {};
+    virtual ~Task_flow() {}
 
-    // Find a task in the graph and return pointer
+    // Find a task in the task_map and return pointer
     Task * find_task(int3&);
 
     // spawn task with index
@@ -393,26 +406,31 @@ struct Task_flow {
     }
 };
 
+Task_flow::Init task_flow_init()
+{
+    return Task_flow::Init();
+}
+
 Task * Task_flow::find_task(int3 & idx)
 {
     Task * t_ = nullptr;
 
     std::unique_lock<std::mutex> lck(mtx_graph);
 
-    auto tsk = graph.find(idx);
+    auto tsk = task_map.find(idx);
 
     // Task exists
-    if (tsk != graph.end()) {
+    if (tsk != task_map.end()) {
         t_ = tsk->second;
     }
     else {
         // Task does not exist; create it
         t_ = new Task;
-        graph[idx] = t_; // Insert in graph
+        task_map[idx] = t_; // Insert in task_map
 
-        m_init(this,idx,t_); // Initialize
+        m_task.init(idx,t_); // Initialize
 
-        ++n_active_task; // Increment counter
+        ++n_task_in_graph; // Increment counter
     }
 
     lck.unlock();
@@ -424,19 +442,19 @@ Task * Task_flow::find_task(int3 & idx)
 
 void Task_flow::async(int3 idx, Task * a_tsk)
 {
-    team->spawn(/* task map */ m_map(idx), a_tsk);
+    team->spawn(/*task map*/ m_task.map(idx), a_tsk);
 
-    // Delete entry in graph
+    // Delete entry in task_map
     std::unique_lock<std::mutex> lck(mtx_graph);
 
-    assert(graph.find(idx) != graph.end());
-    graph.erase(idx);
+    assert(task_map.find(idx) != task_map.end());
+    task_map.erase(idx);
 
-    -- n_active_task; // Decrement counter
-    assert(n_active_task >= 0);
+    -- n_task_in_graph; // Decrement counter
+    assert(n_task_in_graph >= 0);
 
     // Signal if quiescence has been reached
-    if (n_active_task == 0) {
+    if (n_task_in_graph == 0) {
         lck.unlock();
         std::unique_lock<std::mutex> lck(mtx_quiescence);
         quiescence = true;
@@ -564,12 +582,9 @@ void test()
 
         vector<Task> tsk(n_thread);
         for(int nt=0; nt<n_thread; ++nt) {
-            tsk[nt] = bind(f_count, &counter[nt]);
+            tsk[nt].init(bind(f_count, &counter[nt]), 0, 0., false);
         }
 
-#ifdef PROFILER
-        ProfilerStart("ctxx.pprof");
-#endif
         {
             team.start();
 #ifdef PROFILER
@@ -578,6 +593,7 @@ void test()
             for(int it=0; it < max_count; ++it) {
                 for(int nt=0; nt<n_thread; ++nt) {
                     team.spawn(0, &tsk[nt]);
+                    // spawn @ 0
                 }
             }
             team.join();
@@ -604,6 +620,7 @@ void test()
             for(int it=0; it < max_count; ++it) {
                 for(int nt=0; nt<n_thread; ++nt) {
                     team.spawn(nt, &tsk[nt]);
+                    // spawn @ nt
                 }
             }
             team.join();
@@ -614,18 +631,14 @@ void test()
 #endif
         }
 
-#ifdef PROFILER
-        ProfilerStop();
-#endif
-
         for(int nt=0; nt<n_thread; ++nt) {
             assert(counter[nt].load() == max_count);
         }
     }
 
     {
-        const int nb = 64; // number of blocks
-        const int b = 1;  // size of blocks
+        const int nb = 4; // number of blocks
+        const int b = 256;  // size of blocks
 
         const int n_thread = 4; // number of threads to use
 
@@ -646,11 +659,10 @@ void test()
         }
 
         auto start = high_resolution_clock::now();
-        auto C = A*B;
-        //printf("First entry in C: %g\n",C(0,0));
+        MatrixXd C = A*B;
         auto end = high_resolution_clock::now();
         auto duration_ = duration_cast<milliseconds>(end - start);
-        //std::cout << "A*B elapsed: " << duration_.count() << "\n";
+        std::cout << "A*B elapsed: " << duration_.count() << "\n";
 
         Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
 
@@ -681,7 +693,7 @@ void test()
         }
         end = high_resolution_clock::now();
         duration_ = duration_cast<milliseconds>(end - start);
-        //std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
+        std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
 
         // First test
         for (int i=0; i<nb; ++i) {
@@ -706,43 +718,59 @@ void test()
         // Second test
         assert(C == C0);
 
-        // Init C
-        for (int i=0; i<nb; ++i) {
-            for (int j=0; j <nb; ++j) {
-                *(Cb(i,j)) = MatrixXd::Zero(b,b);
-            }
-        }
-
-        // Re-doing calculation using task graph
-
-        // Task to run
-        auto fun_gemm = [&] (Task_flow * a_tg, int i, int j, int k) {
-            *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
-
-            // Release dependency on the next task
-            if (k < nb - 1) {
-                a_tg->decrement_wait_count({i,j,k+1});
-            }
-        };
-
-        // Task initialization
-        auto l_task_gemm = [=] (Task_flow * a_tg, int3 & idx, Task* a_tsk) {
-            int wait_count = ( idx[2] == 0 ? 0 : 1); // index k
-            a_tsk->init( bind(fun_gemm,a_tg,idx[0],idx[1],idx[2]),
-                         wait_count, /*delete=*/ true );
-            // Free memory after task is run
-        };
-
-        // Mapping to task index to thread ID
-        auto l_map = [=] (int3& idx) -> int {
-            return ( ( idx[0] + nb * idx[1] ) % n_thread );
-        };
+        // Re-doing calculation using task task_map
 
         // Create thread team
         Thread_team team(n_thread);
 
-        // Task flow
-        Task_flow gemm_g(&team, l_task_gemm, l_map);
+        // Task flow context
+        struct Context {
+            Task_flow init_mat;
+            Task_flow gemm_g;
+            Context(Thread_team* a_tt) : init_mat(a_tt), gemm_g(a_tt) {}
+        } ctx(&team);
+
+        // Init task
+        auto l_init = [&] (int i, int j) {
+            *(Ab(i,j)) = A.block(i*b,j*b,b,b);
+            *(Bb(i,j)) = B.block(i*b,j*b,b,b);
+            *(Cb(i,j)) = MatrixXd::Zero(b,b);
+            for (int k=0; k<nb; ++k) {
+                ctx.gemm_g.decrement_wait_count({i,k,0});
+                ctx.gemm_g.decrement_wait_count({k,j,0});
+            }
+        };
+
+        ctx.init_mat = task_flow_init()
+        .task_init( [=] (int3& idx, Task* a_tsk) {
+            a_tsk->init( bind(l_init,idx[0],idx[1]),
+                         /*wait_count*/  0);
+        })
+        .compute_on([=] (int3& idx) {
+            return ( ( idx[0] + nb * idx[1] ) % n_thread );
+        });
+
+        // GEMM task
+        auto l_gemm = [&] (int i, int j, int k) {
+            *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
+            if (k < nb - 1) {
+                ctx.gemm_g.decrement_wait_count({i,j,k+1});
+            }
+        };
+
+        auto l_gemm_wait_count = [&] (int k) {
+            return ( k == 0 ? 2*nb : 1);
+        };
+
+        ctx.gemm_g = task_flow_init()
+        .task_init( [=] (int3& idx, Task* a_tsk) {
+            int wait_count = l_gemm_wait_count(/*k*/ idx[2]);
+            a_tsk->init( bind(l_gemm,idx[0],idx[1],idx[2]),
+                         wait_count);
+        })
+        .compute_on([=] (int3& idx) {
+            return ( ( idx[0] + nb * idx[1] ) % n_thread );
+        });
 
         // Start team of threads
         team.start();
@@ -752,15 +780,12 @@ void test()
 #endif
         start = high_resolution_clock::now();
 
-        // Create seed tasks in graph and start
+        // Create seed tasks and start
         for (int i=0; i<nb; ++i) {
             for (int j=0; j<nb; ++j) {
-                gemm_g.async({i,j,0});
+                ctx.init_mat.async({i,j,0});
             }
         }
-
-        // Wait for all tasks to be posted
-        gemm_g.wait();
 
         // Wait for end of task queue execution
         team.join();
