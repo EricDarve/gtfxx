@@ -4,3 +4,7 @@ ctxx.prof
 main.cpp.orig
 ctxx.pprof
 test.cpp
+
+googletest-master/
+libgtest.a
+output.txt

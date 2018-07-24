@@ -9,8 +9,14 @@ FLAGS=-std=c++11 -O2 -DNDEBUG
 
 INC=-I/usr/local/Cellar/eigen/3.3.4/include/eigen3
 
-ctxx: main.cpp
-	icpc $(INC) $(FLAGS) -o ctxx main.cpp
+#CPP = icpc
+CPP = g++
+
+ctxx: main.cpp libgtest.a
+	$(CPP) $(INC) $(FLAGS) -isystem googletest/include -pthread main.cpp libgtest.a -o ctxx
+
+libgtest.a:
+	cd googletest; $(CPP) -isystem ./include -I. -pthread -c ./src/gtest-all.cc; ar -rv ../libgtest.a gtest-all.o
 
 clean:
-	rm -f ctxx
+	rm -f ctxx libgtest.a
