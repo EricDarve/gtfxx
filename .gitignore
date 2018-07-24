@@ -6,5 +6,6 @@ ctxx.pprof
 test.cpp
 
 googletest-master/
+googletest/gtest-all.o
 libgtest.a
 output.txt

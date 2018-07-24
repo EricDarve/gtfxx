@@ -23,9 +23,7 @@
 
 #include <chrono>
 
-#ifdef PROFILER
-#include <gperftools/profiler.h>
-#endif
+#include "gtest/gtest.h"
 
 using namespace std::chrono;
 
@@ -85,10 +83,6 @@ void f_1()
 {
 }
 
-void f_2()
-{
-}
-
 void f_x(int * x)
 {
     --(*x);
@@ -110,21 +104,25 @@ struct Fun_mv {
 };
 
 struct Task : public Base_task {
-    float priority = 0.0; // task priority
+    float m_priority = 0.0; // task priority
 
     bool m_delete = false;
     // whether the object should be deleted after running the function
     // to completion.
 
-    std::atomic_int wait_count = -1; // number of dependencies
+    std::atomic_int m_wait_count; // number of dependencies
 
-    Task() {}
+    Task()
+    {
+        m_wait_count.store(-1); // Must be initialized at -1
+    }
+
     ~Task() {}
 
-    void init(Base_task a_f, float a_priority = 0.0, bool a_del = false)
+    void set_function(Base_task a_f, float a_priority = 0.0, bool a_del = false)
     {
         Base_task::operator=(a_f);
-        priority = a_priority;
+        m_priority = a_priority;
         m_delete = a_del;
     }
 
@@ -139,7 +137,7 @@ struct Task_comparison {
 public:
     bool operator() (const Task* a_lhs, const Task* a_rhs) const
     {
-        return (a_lhs->priority < a_rhs->priority);
+        return (a_lhs->m_priority < a_rhs->m_priority);
     };
 };
 
@@ -205,10 +203,10 @@ struct Thread_prio {
 
 struct Thread_team : public vector<Thread_prio*> {
     vector<Thread_prio> v_thread;
-    unsigned long n_query_spawn = 1; // Optimization parameter
-    unsigned long n_query_steal = 1; // Optimization parameter
-    std::atomic_int ntasks = 0; // number of ready tasks in any thread queue
-    std::atomic_bool m_stop = false;
+    unsigned long n_query_spawn = 8; // Optimization parameter
+    unsigned long n_query_steal = 8; // Optimization parameter
+    std::atomic_int ntasks; // number of ready tasks in any thread queue
+    std::atomic_bool m_stop;
 
     Thread_team(const int n_thread) : v_thread(n_thread)
     {
@@ -216,10 +214,17 @@ struct Thread_team : public vector<Thread_prio*> {
             v_thread[i].team = this;
             v_thread[i].m_id = static_cast<unsigned short>(i);
         }
+        ntasks.store(0);
+        m_stop.store(false);
+
+        assert(n_query_spawn >= 0);
+        assert(n_query_steal >= 0);
     }
 
     void start()
     {
+        ntasks.store(0);
+        m_stop.store(false);
         for (auto& th : v_thread) th.start();
     }
 
@@ -388,7 +393,7 @@ void Task_flow::init_task(int3& idx)
 {
     Task& tsk = task_grid(idx[0],idx[1],idx[2]);
     int wait_count = m_task.init(idx,&tsk);
-    std::atomic_fetch_add(&(tsk.wait_count), wait_count+1);
+    std::atomic_fetch_add(&(tsk.m_wait_count), wait_count+1);
 }
 
 // Spawn task
@@ -412,11 +417,11 @@ void Task_flow::decrement_wait_count(int3 idx)
 
     Task& tsk = task_grid(idx[0],idx[1],idx[2]);
     // Decrement counter
-    int wait_count = std::atomic_fetch_sub(&(tsk.wait_count),1);
+    int wait_count = std::atomic_fetch_sub(&(tsk.m_wait_count),1);
 
     if (wait_count == -1) { // Uninitialized task
         init_task(idx);
-        wait_count = std::atomic_fetch_sub(&(tsk.wait_count),1);
+        wait_count = std::atomic_fetch_sub(&(tsk.m_wait_count),1);
     }
 
     if (wait_count == 0) { // task is ready to run
@@ -445,358 +450,352 @@ struct Block_matrix : vector<MatrixXd*> {
     }
 };
 
-void test();
-
-int main(void)
+TEST(TaskFlow, BasicTask)
 {
+    Task t1;
+    t1.set_function( f_1 );
+    ASSERT_EQ(t1.m_priority, 0.0);
+    ASSERT_EQ(t1.m_delete, false);
+    ASSERT_EQ(t1.m_wait_count.load(), -1);
+    t1();
 
-    try {
-        test();
-    }
-    catch (std::exception& a_e) {
-        std::cout << a_e.what() << '\n';
-    }
+    Task t2;
+    t2.set_function( f_1, 1.0 );
+    ASSERT_EQ(t2.m_priority, 1.0);
+    ASSERT_EQ(t2.m_delete, false);
+    ASSERT_EQ(t2.m_wait_count.load(), -1);
+    t2();
 
-    return 0;
+    Task t3;
+    t3.set_function( f_1, 1.0, true );
+    ASSERT_EQ(t3.m_priority, 1.0);
+    ASSERT_EQ(t3.m_delete, true);
+    ASSERT_EQ(t3.m_wait_count.load(), -1);
+    t3();
+
+    // Task using function with bind()
+    int x = 2;
+    Task t4;
+    t4.set_function(bind(f_x, &x));
+    t4();
+    ASSERT_EQ(x, 1);
+
+    MatrixXd A(2,2);
+    A << 1,1,2,-2;
+    ASSERT_EQ(A(0,0), 1);
+    ASSERT_EQ(A(0,1), 1);
+    ASSERT_EQ(A(1,0), 2);
+    ASSERT_EQ(A(1,1), -2);
+
+    VectorXd vec_x(2);
+    vec_x << 3,2;
+    ASSERT_EQ(vec_x(0), 3);
+    ASSERT_EQ(vec_x(1), 2);
+
+    VectorXd vec_y(2);
+
+    // Demonstrating a function with arguments without bind()
+    Fun_mv f_mv;
+    f_mv.A = &A;
+    f_mv.x = &vec_x;
+    f_mv.y = &vec_y;
+
+    Task t5;
+    t5.set_function(f_mv);
+    t5();
+
+    ASSERT_EQ(vec_y(0), 5);
+    ASSERT_EQ(vec_y(1), 2);
 }
 
-void test()
+TEST(TaskFlow, Team)
 {
+    const int n_thread = 1024;
+    const int max_count = 10;
 
-#if 0
+    // Create thread team
+    Thread_team team(n_thread);
 
-    {
-        Task t1( f_1 );
-        assert(t1.m_wait_count == 0);
+    ASSERT_EQ(team.v_thread.size(), n_thread);
+    ASSERT_EQ(team.ntasks.load(), 0);
+    ASSERT_EQ(team.m_stop.load(), false);
 
-        Task t2( f_2, 4 );
-        assert(t2.m_wait_count == 4);
+    vector<std::atomic_int> counter(n_thread);
 
-        t1();
-        t2();
+    for(auto & c : counter) {
+        c.store(0);
+    }
+
+    vector<Task> tsk(n_thread);
+    for(int nt=0; nt<n_thread; ++nt) {
+        tsk[nt].set_function(bind(f_count, &counter[nt]));
     }
 
     {
-        int x = 2;
-        assert(x == 2);
-
-        Task t(bind(f_x, &x));
-        t();
-
-        assert(x == 1);
-    }
-
-    {
-        MatrixXd A(2,2);
-        A << 1,1,2,-2;
-        assert(A(0,0) == 1);
-        assert(A(0,1) == 1);
-        assert(A(1,0) == 2);
-        assert(A(1,1) == -2);
-        VectorXd x(2);
-        x << 3,2;
-        assert(x(0) == 3);
-        assert(x(1) == 2);
-        VectorXd y(2);
-
-        // Demonstrating a function with arguments without bind()
-        Fun_mv f_mv;
-        f_mv.A = &A;
-        f_mv.x = &x;
-        f_mv.y = &y;
-
-        Task t(f_mv);
-        t();
-
-        assert(y(0) == 5);
-        assert(y(1) == 2);
-    }
-
-    {
-        const int n_thread = 4;
-        const int max_count = 10;
-
-        // Create thread team
-        Thread_team team(n_thread);
-        vector<std::atomic_int> counter(n_thread);
-
-        for(auto & c : counter)
-        {
-            c.store(0);
-        }
-
-        vector<Task> tsk(n_thread);
-        for(int nt=0; nt<n_thread; ++nt)
-        {
-            tsk[nt].init(bind(f_count, &counter[nt]), 0, 0., false);
-        }
-
-        {
-            team.start();
-#ifdef PROFILER
-            auto start = high_resolution_clock::now();
-#endif
-            for(int it=0; it < max_count; ++it)
-            {
-                for(int nt=0; nt<n_thread; ++nt) {
-                    team.spawn(0, &tsk[nt]);
-                    // spawn @ 0
-                }
-            }
-            team.join();
-#ifdef PROFILER
-            auto end = high_resolution_clock::now();
-            auto duration_ = duration_cast<milliseconds>(end - start);
-            std::cout << "Elapsed: " << duration_.count() << "\n";
-#endif
-        }
-
-        for(int nt=0; nt<n_thread; ++nt)
-        {
-            assert(counter[nt].load() == max_count);
-        }
-
-        for(auto & c : counter)
-        {
-            c.store(0);
-        }
-
-        {
-            team.start();
-#ifdef PROFILER
-            auto start = high_resolution_clock::now();
-#endif
-            for(int it=0; it < max_count; ++it)
-            {
-                for(int nt=0; nt<n_thread; ++nt) {
-                    team.spawn(nt, &tsk[nt]);
-                    // spawn @ nt
-                }
-            }
-            team.join();
-#ifdef PROFILER
-            auto end = high_resolution_clock::now();
-            auto duration_ = duration_cast<milliseconds>(end - start);
-            std::cout << "Elapsed: " << duration_.count() << "\n";
-#endif
-        }
-
-        for(int nt=0; nt<n_thread; ++nt)
-        {
-            assert(counter[nt].load() == max_count);
-        }
-    }
-
-#endif
-
-    {
-        const int nb = 32; // number of blocks
-        const int b = 1;  // size of blocks
-
-        const int n_thread = 1024; // number of threads to use
-
-        const int n = b*nb; // matrix size
-
-        MatrixXd A(n,n), B(n,n);
-
-        // Initialize GEMM matrices
-        std::mt19937 mers_rand;
-        // Seed the engine
-        mers_rand.seed(2018);
-
-        for (int i=0; i<n; ++i)
-        {
-            for (int j=0; j<n; ++j) {
-                A(i,j) = mers_rand()%3;
-                B(i,j) = mers_rand()%3;
-            }
-        }
-
+        team.start();
         auto start = high_resolution_clock::now();
-        MatrixXd C = A*B;
+        for(int it=0; it < max_count; ++it) {
+            for(int nt=0; nt<n_thread; ++nt) {
+                team.spawn(0, &tsk[nt]);
+                // spawn @ 0
+            }
+        }
+        team.join();
         auto end = high_resolution_clock::now();
         auto duration_ = duration_cast<milliseconds>(end - start);
-        // std::cout << "A*B elapsed: " << duration_.count() << "\n";
+        ASSERT_GE(0, team.ntasks.load());
 
-        {
-            Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
+        std::cout << "Elapsed time for spawn @0: " << duration_.count() << "\n";
+    }
 
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
-                    Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
-                    Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
-                }
+    for(int nt=0; nt<n_thread; ++nt) {
+        ASSERT_EQ(counter[nt].load(), max_count);
+    }
+
+    for(auto & c : counter) {
+        c.store(0);
+    }
+
+    {
+        team.start();
+        auto start = high_resolution_clock::now();
+        for(int it=0; it < max_count; ++it) {
+            for(int nt=0; nt<n_thread; ++nt) {
+                team.spawn(nt, &tsk[nt]);
+                // spawn @ nt
             }
+        }
+        team.join();
+        auto end = high_resolution_clock::now();
+        auto duration_ = duration_cast<milliseconds>(end - start);
+        std::cout << "Elapsed time for spawn @nt: " << duration_.count() << "\n";
+    }
 
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    assert(*(Ab(i,j)) == A.block(i*b,j*b,b,b));
-                    assert(*(Bb(i,j)) == B.block(i*b,j*b,b,b));
-                    assert(*(Cb(i,j)) == MatrixXd::Zero(b,b));
-                }
+    for(int nt=0; nt<n_thread; ++nt) {
+        ASSERT_EQ(counter[nt].load(), max_count);
+    }
+}
+
+TEST(TaskFlow, Eigen)
+{
+    const int nb = 8; // number of blocks
+    const int b = 8;   // size of blocks
+
+    const int n = b*nb; // matrix size
+
+    MatrixXd A(n,n), B(n,n);
+
+    // Initialize GEMM matrices
+    std::mt19937 mers_rand;
+    // Seed the random engine
+    mers_rand.seed(2018);
+
+    for (int i=0; i<n; ++i) {
+        for (int j=0; j<n; ++j) {
+            A(i,j) = mers_rand()%3;
+            B(i,j) = mers_rand()%3;
+        }
+    }
+
+    MatrixXd C = A*B; // Reference result for testing
+
+    // Doing calculation using matrix of blocks
+    {
+        Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
+
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j <nb; ++j) {
+                Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
+                Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
+                Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
             }
+        }
 
-            start = high_resolution_clock::now();
-            // Calculate matrix product using blocks
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    for (int k=0; k <nb; ++k) {
-                        *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j));
-                    }
-                }
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j <nb; ++j) {
+                ASSERT_EQ(*(Ab(i,j)), A.block(i*b,j*b,b,b));
+                ASSERT_EQ(*(Bb(i,j)), B.block(i*b,j*b,b,b));
+                ASSERT_EQ(*(Cb(i,j)), MatrixXd::Zero(b,b));
             }
-            end = high_resolution_clock::now();
-            duration_ = duration_cast<milliseconds>(end - start);
-            // std::cout << "Block A*B elapsed: " << duration_.count() << "\n";
+        }
 
-            // First test
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
-                }
-            }
-
-            // Copy back for testing purposes
-            MatrixXd C0(n,n);
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j<nb; ++j) {
-                    MatrixXd & M = *(Cb(i,j));
-                    for (int i0=0; i0<b; ++i0) {
-                        for (int j0=0; j0<b; ++j0) {
-                            C0(i0+b*i,j0+b*j) = M(i0,j0);
-                        }
-                    }
-                }
-            }
-
-            // Second test
-            assert(C == C0);
-
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    delete Ab(i,j);
-                    delete Bb(i,j);
-                    delete Cb(i,j);
+        // Calculate matrix product using blocks
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j <nb; ++j) {
+                for (int k=0; k <nb; ++k) {
+                    *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j));
                 }
             }
         }
 
-        // Re-doing calculation using task flow
-        {
+        // First test
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j <nb; ++j) {
+                ASSERT_EQ(*(Cb(i,j)), C.block(i*b,j*b,b,b));
+            }
+        }
 
-            Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
-
-            // Create thread team
-            Thread_team team(n_thread);
-
-            // Task flow context
-            struct Context {
-                Task_flow init_mat;
-                Task_flow gemm_g;
-                Context(Thread_team* a_tt, int a_nb) :
-                    init_mat(a_tt,nb,nb,1),
-                    gemm_g(a_tt,nb,nb,nb) {}
-            } ctx(&team, nb);
-
-            auto compute_on_ij = [=] (int3& idx)
-            {
-                return ( ( idx[0] + nb * idx[1] ) % n_thread );
-            };
-
-            // Init task flow
-            ctx.init_mat = task_flow_init()
-                           .task_init([=,&ctx,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) -> int
-            {
-                int i = idx[0];
-                int j = idx[1];
-                a_tsk->init([=,&ctx,&Ab,&Bb,&Cb] ()
-                {
-                    Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
-                    Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
-                    Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
-                    for (int k=0; k<nb; ++k) {
-                        ctx.gemm_g.decrement_wait_count({i,k,0});
-                        ctx.gemm_g.decrement_wait_count({k,j,0});
+        // Copy back for testing purposes
+        MatrixXd C0(n,n);
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j<nb; ++j) {
+                MatrixXd & M = *(Cb(i,j));
+                for (int i0=0; i0<b; ++i0) {
+                    for (int j0=0; j0<b; ++j0) {
+                        C0(i0+b*i,j0+b*j) = M(i0,j0);
                     }
-                });
-                return 0; // wait_count
-            })
-            .compute_on(compute_on_ij);
-
-            // GEMM task flow
-            ctx.gemm_g = task_flow_init()
-                         .task_init([=,&ctx,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) -> int
-            {
-                int i = idx[0];
-                int j = idx[1];
-                int k = idx[2];
-
-                a_tsk->init([=,&ctx,&Ab,&Bb,&Cb] ()
-                {
-                    *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
-                    if (k < nb - 1) {
-                        ctx.gemm_g.decrement_wait_count({i,j,k+1});
-                    }
-                });
-                return (/*k*/ idx[2] == 0 ? 2*nb : 1); // wait_count
-            })
-            .compute_on(compute_on_ij);
-
-            // Start team of threads
-            team.start();
-
-#ifdef PROFILER
-            ProfilerStart("ctxx.pprof");
-#endif
-            start = high_resolution_clock::now();
-
-            // Create seed tasks and start
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j<nb; ++j) {
-                    ctx.init_mat.async({i,j,0});
                 }
             }
+        }
 
-            // Wait for end of task queue execution
-            team.join();
+        // Second test
+        ASSERT_EQ(C, C0);
 
-#ifdef PROFILER
-            ProfilerStop();
-#endif
-
-            end = high_resolution_clock::now();
-            duration_ = duration_cast<milliseconds>(end - start);
-            // std::cout << "CTXX GEMM elapsed: " << duration_.count() << "\n";
-
-            // Test output
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    if ( *(Cb(i,j)) != C.block(i*b,j*b,b,b) ) {
-                        LOG(i << " " << j << " = " << *(Cb(i,j)) << " " << C.block(i*b,j*b,b,b));
-                    }
-                }
-                for (int j=0; j <nb; ++j) {
-                    assert(*(Cb(i,j)) == C.block(i*b,j*b,b,b));
-                }
-            }
-
-            for (int i=0; i<nb; ++i)
-            {
-                for (int j=0; j <nb; ++j) {
-                    delete Ab(i,j);
-                    delete Bb(i,j);
-                    delete Cb(i,j);
-                }
+        for (int i=0; i<nb; ++i) {
+            for (int j=0; j <nb; ++j) {
+                delete Ab(i,j);
+                delete Bb(i,j);
+                delete Cb(i,j);
             }
         }
     }
+}
+
+TEST(TaskFlow, GEMM)
+{
+    const int nb = 32; // number of blocks
+    const int b = 1;  // size of blocks
+
+    const int n_thread = 1024; // number of threads to use
+
+    const int n = b*nb; // matrix size
+
+    MatrixXd A(n,n), B(n,n);
+
+    // Initialize GEMM matrices
+    std::mt19937 mers_rand;
+    // Seed the engine
+    mers_rand.seed(2018);
+
+    for (int i=0; i<n; ++i) {
+        for (int j=0; j<n; ++j) {
+            A(i,j) = mers_rand()%3;
+            B(i,j) = mers_rand()%3;
+        }
+    }
+
+    auto start = high_resolution_clock::now();
+    MatrixXd C = A*B;
+    auto end = high_resolution_clock::now();
+    auto duration_ = duration_cast<milliseconds>(end - start);
+    std::cout << "Elapsed time Eigen: " << duration_.count() << "\n";
+
+    // Calculation using task flow
+    Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
+
+    // Create thread team
+    Thread_team team(n_thread);
+
+    // Task flow context
+    struct Context {
+        Task_flow init_mat;
+        Task_flow gemm_g;
+        Context(Thread_team* a_tt, int a_nb) :
+            init_mat(a_tt,a_nb,a_nb,1),
+            gemm_g(a_tt,a_nb,a_nb,a_nb) {}
+    } ctx(&team, nb);
+
+    ASSERT_EQ(ctx.init_mat.team, &team);
+    ASSERT_EQ(ctx.init_mat.task_grid.n0, nb);
+    ASSERT_EQ(ctx.init_mat.task_grid.n1, nb);
+    ASSERT_EQ(ctx.init_mat.task_grid.n2, 1);
+    ASSERT_EQ(ctx.gemm_g.task_grid.n0, nb);
+    ASSERT_EQ(ctx.gemm_g.task_grid.n1, nb);
+    ASSERT_EQ(ctx.gemm_g.task_grid.n2, nb);
+
+    auto compute_on_ij = [=] (int3& idx) {
+        return ( ( idx[0] + nb * idx[1] ) % n_thread );
+    };
+
+    // Init task flow
+    ctx.init_mat = task_flow_init()
+    .task_init([=,&ctx,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) -> int {
+        int i = idx[0];
+        int j = idx[1];
+        a_tsk->set_function([=,&ctx,&Ab,&Bb,&Cb] ()
+        {
+            Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
+            Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
+            Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
+            for (int k=0; k<nb; ++k) {
+                ctx.gemm_g.decrement_wait_count({i,k,0});
+                ctx.gemm_g.decrement_wait_count({k,j,0});
+            }
+        });
+        return 0; // wait_count
+    })
+    .compute_on(compute_on_ij);
+
+    // GEMM task flow
+    ctx.gemm_g = task_flow_init()
+    .task_init([=,&ctx,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) -> int {
+        int i = idx[0];
+        int j = idx[1];
+        int k = idx[2];
+
+        a_tsk->set_function([=,&ctx,&Ab,&Bb,&Cb] ()
+        {
+            *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
+            if (k < nb - 1) {
+                ctx.gemm_g.decrement_wait_count({i,j,k+1});
+            }
+        });
+        return (/*k*/ idx[2] == 0 ? 2*nb : 1); // wait_count
+    })
+    .compute_on(compute_on_ij);
+
+    // Start team of threads
+    team.start();
+
+    start = high_resolution_clock::now();
+
+    // Create seed tasks and start
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j<nb; ++j) {
+            ctx.init_mat.async({i,j,0});
+        }
+    }
+
+    // Wait for end of task queue execution
+    team.join();
+
+    end = high_resolution_clock::now();
+    duration_ = duration_cast<milliseconds>(end - start);
+    std::cout << "Elapsed time Task Flow: " << duration_.count() << "\n";
+
+    // Test output
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j <nb; ++j) {
+            if ( *(Cb(i,j)) != C.block(i*b,j*b,b,b) ) {
+                LOG(i << " " << j << " = " << *(Cb(i,j)) << " " << C.block(i*b,j*b,b,b));
+            }
+        }
+        for (int j=0; j <nb; ++j) {
+            ASSERT_EQ(*(Cb(i,j)), C.block(i*b,j*b,b,b));
+        }
+    }
+
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j <nb; ++j) {
+            delete Ab(i,j);
+            delete Bb(i,j);
+            delete Cb(i,j);
+        }
+    }
+}
+
+int main(int argc, char **argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }
