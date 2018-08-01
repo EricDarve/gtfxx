@@ -9,3 +9,8 @@ googletest-master/
 googletest/gtest-all.o
 libgtest.a
 output.txt
+
+deque
+deque.cpp.orig
+deque.dSYM/
+deque_v1.cpp
