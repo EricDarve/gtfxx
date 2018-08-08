@@ -9,10 +9,10 @@ FLAGS=-std=c++11 -g -Wall -Wextra -Wnon-virtual-dtor -pedantic
 
 INC=-I/usr/local/Cellar/eigen/3.3.4/include/eigen3
 
-#CPP = icpc
-CPP = g++
+CPP = icpc
+#CPP = g++
 
-deque: deque.cpp libgtest.a
+deque: deque.cpp threadpool.hpp libgtest.a
 	$(CPP) $(FLAGS) -isystem googletest/include -pthread deque.cpp libgtest.a -o deque
 
 ctxx: main.cpp libgtest.a
