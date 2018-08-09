@@ -12,13 +12,18 @@ INC=-I/usr/local/Cellar/eigen/3.3.4/include/eigen3
 CPP = icpc
 #CPP = g++
 
-deque: deque.cpp threadpool.hpp libgtest.a
+.PHONY : clean test
+
+deque : deque.cpp threadpool.hpp libgtest.a
 	$(CPP) $(FLAGS) -isystem googletest/include -pthread deque.cpp libgtest.a -o deque
 
-ctxx: main.cpp libgtest.a
+test :
+	./deque --gtest_repeat=50 --gtest_break_on_failure
+
+ctxx : main.cpp libgtest.a
 	$(CPP) $(INC) $(FLAGS) -isystem googletest/include -pthread main.cpp libgtest.a -o ctxx
 
-libgtest.a:
+libgtest.a :
 	cd googletest; $(CPP) -isystem ./include -I. -pthread -c ./src/gtest-all.cc; ar -rv ../libgtest.a gtest-all.o
 
 clean:
