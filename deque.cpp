@@ -1,5 +1,6 @@
 #include <string>
 #include <strstream>
+#include <ctime>
 #include <atomic>
 #include <vector>
 #include <random>
@@ -14,11 +15,10 @@
  Proposed algorithm:
  1. Use array based MPSC queue to enqueue tasks for threads
  2. Use array based MPMC queue for list of idle threads; this is queried during task pops to improve the load balancing
- 3. When a thread enqueue is full, we use a private linked list used to postponed the insertion. The insertion is attempted again during the next post. This should have minor performance impact since the full queue corresponds to a busy thread.
+ 3. When a thread enqueue is full, we use a private queue to postpone the insertion. The insertion is attempted again during the next post. This should have minor performance impact since the full queue corresponds to a busy thread.
  4. Each thread pops from their queues and use a private priority queue.
  5. Idle thread queue is used to deal work to idle threads.
  6. MPSC and MPMC array queues are implemented using CAS and a tail/head index with wrapping.
- 7. Check that ABA is not a problem with this implementation.
  */
 
 std::atomic_int c_push_fail{0};
@@ -62,12 +62,11 @@ struct Deque {
 
         if (cas) {
             ++size;
+//            printf("push success head/tail %d %d\n",m_head.load(),m_tail.load());
         }
         else {
-            const unsigned fail_ = ++c_push_fail;
-            const unsigned log_freq = 1000000;
-            if ((fail_-1)%log_freq == log_freq-1)
-                printf("pop failed %10d\n",fail_);
+            ++c_push_fail;
+//            printf("push fail head/tail %d %d\n",m_head.load(),m_tail.load());
         }
 
         return cas;
@@ -87,14 +86,13 @@ struct Deque {
 
         if (exchg) {
             --size;
+//            printf("pop success head/tail %d %d\n",m_head.load(),m_tail.load());
             // Successful pop
             *a_x = val;
         }
         else {
-            const unsigned fail_ = ++c_pop_fail;
-            const unsigned log_freq = 1000000;
-            if ((fail_-1)%log_freq == log_freq-1)
-                printf("pop failed %10d\n",fail_);
+            ++c_pop_fail;
+//            printf("pop fail head/tail %d %d\n",m_head.load(),m_tail.load());
         }
 
         return exchg;
@@ -110,10 +108,25 @@ struct Deque {
         return (size.load() == 0);
     }
 
+    bool full()
+    {
+        return (size.load() == t_buffer_size);
+    }
+
     bool empty_traverse()
     {
         for (int i=0; i<t_buffer_size; ++i) {
             if (m_data[i].load() != empty_token) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool full_traverse()
+    {
+        for (int i=0; i<t_buffer_size; ++i) {
+            if (m_data[i].load() == empty_token) {
                 return false;
             }
         }
@@ -136,12 +149,56 @@ TEST(Atomic, Lock_free)
     ASSERT_TRUE(std::atomic<void*> {}.is_lock_free());
 }
 
+TEST(Deque, Empty_Full)
+{
+    const unsigned loop_size = 4;
+    Deque<int, loop_size> dq;
+
+    ASSERT_TRUE(dq.empty_traverse());
+    ASSERT_TRUE(dq.empty());
+    ASSERT_FALSE(dq.full_traverse());
+    ASSERT_FALSE(dq.full());
+
+    std::vector< int > input(loop_size);
+    int* output;
+
+    for (int i=0; i<loop_size; ++i) {
+        input[i] = i;
+    }
+
+    for (unsigned i=0; i<loop_size; ++i) {
+        ASSERT_FALSE(dq.full_traverse());
+        ASSERT_FALSE(dq.full());
+        dq.push(&input[i]);
+        ASSERT_FALSE(dq.empty_traverse());
+        ASSERT_FALSE(dq.empty());
+    }
+
+    ASSERT_FALSE(dq.empty_traverse());
+    ASSERT_FALSE(dq.empty());
+    ASSERT_TRUE(dq.full_traverse());
+    ASSERT_TRUE(dq.full());
+
+    for (unsigned i=0; i<loop_size; ++i) {
+        ASSERT_FALSE(dq.empty_traverse());
+        ASSERT_FALSE(dq.empty());
+        dq.pop(&output);
+        ASSERT_FALSE(dq.full_traverse());
+        ASSERT_FALSE(dq.full());
+    }
+
+    ASSERT_TRUE(dq.empty_traverse());
+    ASSERT_TRUE(dq.empty());
+    ASSERT_FALSE(dq.full_traverse());
+    ASSERT_FALSE(dq.full());
+}
+
 template <int queue_size>
 void basic_test(const int loop_size)
 {
     Deque<int, queue_size> dq;
     std::vector< int > input(loop_size);
-    int * output;
+    int* output;
 
     for (int i=0; i<loop_size; ++i) {
         input[i] = i;
@@ -183,8 +240,8 @@ void basic_test(const int loop_size)
         ASSERT_EQ(c_pop_fail.load(), 0);
     }
 
-    EXPECT_TRUE(dq.empty_traverse());
-    EXPECT_TRUE(dq.empty());
+    ASSERT_TRUE(dq.empty_traverse());
+    ASSERT_TRUE(dq.empty());
     ASSERT_EQ(sum_in, sum_out);
 }
 
@@ -209,61 +266,90 @@ TEST(Basic, LongLoop)
     basic_test<queue_size>(loop_size);
 }
 
-template <int queue_size>
-void test_many_threads(const unsigned n_thread,
-                       unsigned outer_max,
-                       const unsigned loop_size_max)
+void thread_sleep()
 {
-    Deque<int, queue_size> dq;
+    int microsecs = 10; // length of time to sleep, in microseconds
+    struct timespec req {
+        0
+    };
+    req.tv_sec = 0;
+    req.tv_nsec = microsecs * 1000L;
+    nanosleep(&req, (struct timespec *)NULL);
+}
 
-    std::atomic_int in{0};
-    std::atomic_int out{0};
-
-    std::vector< std::future<void> > future_push(n_thread), future_pop(n_thread);
-
+template <int queue_size>
+void test_async(const unsigned n_async,
+                unsigned outer_max,
+                const unsigned loop_size_max)
+{
     std::vector< int > input(loop_size_max);
     for (unsigned i=0; i<loop_size_max; ++i) {
         input[i] = i;
     }
 
-    auto lambda_push = [=,&dq,&input,&in] (unsigned loop_size) {
-        for (unsigned i=0; i<loop_size; ++i) {
+    std::vector< std::future<int> > future_push(outer_max*n_async);
+    std::vector< std::future<int> > future_pop(future_push.size());
+
+    Deque<int, queue_size> dq;
+    std::atomic_int in{0};
+    std::atomic_int out{0};
+
+    auto lambda_push = [=,&dq,&future_push,&future_pop,&input,&in] (unsigned f_count, unsigned loop_size) -> int {
+        assert(loop_size > 0);
+        for (unsigned i=0; i<loop_size; ++i)
+        {
             if (dq.push(&input[i]))
                 in.fetch_add(input[i]);
         }
+        return static_cast<int>(f_count);
     };
 
-    auto lambda_pop = [=,&dq,&future_push,&out] (int i, unsigned loop_size) {
-        future_push[i].wait();
+    auto lambda_pop = [=,&dq,&future_push,&future_pop,&out] (unsigned f_count, unsigned loop_size) -> int {
+        assert(loop_size > 0);
         int* output;
-        for (unsigned i=0; i<loop_size; ++i) {
+        for (unsigned i=0; i<loop_size; ++i)
+        {
             if (dq.pop(&output))
                 out.fetch_add(*output);
         }
+        return static_cast<int>(f_count);
     };
 
     c_push_fail.store(0);
     c_pop_fail.store(0);
 
+    int count_ops = 0;
+
+    unsigned f_count = 0;
     for (unsigned outer=0; outer<outer_max; ++outer) {
-        const unsigned loop_size = ((1+outer)*loop_size_max) / outer_max;
-        assert(loop_size <= loop_size_max);
-        for (unsigned i=0; i<n_thread; ++i) {
-            future_push[i] = std::async(std::launch::async, lambda_push, loop_size);
-            future_pop[i]  = std::async(std::launch::async, lambda_pop, i, loop_size);
+        const unsigned loop_size = 1 + (outer*loop_size_max)/outer_max;
+        ASSERT_GE(loop_size_max, loop_size);
+        for (unsigned i=0; i<n_async; ++i, ++f_count) {
+            ASSERT_GT(future_push.size(), f_count);
+            future_push[f_count] = std::async(std::launch::async, lambda_push, f_count, loop_size);
+            future_pop[f_count]  = std::async(std::launch::async, lambda_pop,  f_count, loop_size);
         }
+        count_ops += loop_size*n_async;
     }
 
-    for (unsigned i=0; i<n_thread; ++i) {
+    for (unsigned i=0; i<outer_max*n_async; ++i) {
+        future_push[i].wait();
         future_pop[i].wait();
     }
 
-    {
+    printf("Rate of failed push: %g\n", float(c_push_fail.load()) / float(count_ops));
+    printf("Rate of failed pop:  %g\n", float( c_pop_fail.load()) / float(count_ops));
+
+    if (! dq.empty()) {
+        unsigned more_pop{0};
         int* output;
         for(unsigned i=0; i<dq.buffer_size(); ++i) {
-            if (dq.pop(&output))
+            if (dq.pop(&output)) {
                 out.fetch_add(*output);
+                ++more_pop;
+            }
         }
+        printf("No. of add'l pops at the end %d\n", more_pop);
     }
 
     EXPECT_TRUE(dq.empty_traverse());
@@ -271,64 +357,65 @@ void test_many_threads(const unsigned n_thread,
     ASSERT_EQ(in.load(), out.load());
 }
 
-TEST(ManyThreads, OneThread)
+TEST(ManyThreads, OneAsync)
 {
     const int queue_size = 1<<20;
-    const unsigned n_thread = 1;
-    unsigned outer_max = 1<<3;
-    const unsigned loop_size_max = 1024;
+    const unsigned n_async = 1;
+    unsigned outer_max = 1<<0;
+    const unsigned loop_size_max = 1<<5;
 
-    test_many_threads<queue_size>(n_thread,
-                                  outer_max,
-                                  loop_size_max);
+    test_async<queue_size>(n_async,
+                           outer_max,
+                           loop_size_max);
 }
 
-TEST(ManyThreads, FewThreads)
+TEST(ManyThreads, FewAsyncs)
 {
-    const int queue_size = (1<<10);
-    const unsigned n_thread = 4;
+    const int queue_size = 1<<20;
+    const unsigned n_async = 4;
     unsigned outer_max = 1<<3;
-    const unsigned loop_size_max = 1024;
+    const unsigned loop_size_max = 1<<5;
 
-    test_many_threads<queue_size>(n_thread,
-                                  outer_max,
-                                  loop_size_max);
+    test_async<queue_size>(n_async,
+                           outer_max,
+                           loop_size_max);
 }
 
 TEST(ManyThreads, LongQueue)
 {
     const int queue_size = 1<<20;
-    const unsigned n_thread = (1<<10);
+    const unsigned n_async = 1<<10;
     unsigned outer_max = 1<<3;
-    const unsigned loop_size_max = 1024;
+    const unsigned loop_size_max = 1<<10;
 
-    test_many_threads<queue_size>(n_thread,
-                                  outer_max,
-                                  loop_size_max);
+    test_async<queue_size>(n_async,
+                           outer_max,
+                           loop_size_max);
 }
 
 TEST(ManyThreads, MediumQueue)
 {
-    const int queue_size = (1<<10);
-    const unsigned n_thread = (1<<10);
+    const int queue_size = 1<<10;
+    const unsigned n_async = 1<<10;
     unsigned outer_max = 1<<3;
-    const unsigned loop_size_max = 1024;
+    const unsigned loop_size_max = 1<<10;
 
-    test_many_threads<queue_size>(n_thread,
-                                  outer_max,
-                                  loop_size_max);
+    test_async<queue_size>(n_async,
+                           outer_max,
+                           loop_size_max);
 }
 
 TEST(ManyThreads, ShortQueue)
 {
-    const int queue_size = (1<<5);
-    const unsigned n_thread = (1<<10);
-    unsigned outer_max = 1<<3;
-    const unsigned loop_size_max = 1024;
 
-    test_many_threads<queue_size>(n_thread,
-                                  outer_max,
-                                  loop_size_max);
+    const int queue_size = 1<<5;
+    const unsigned n_async = 1<<10;
+    unsigned outer_max = 1<<3;
+    const unsigned loop_size_max = 1<<10;
+
+    test_async<queue_size>(n_async,
+                           outer_max,
+                           loop_size_max);
 }
 
 template <int queue_size>
@@ -336,20 +423,16 @@ void test_thread_pool(const unsigned n_thread,
                       unsigned outer_max,
                       const unsigned loop_size_max)
 {
-    Deque<int, queue_size> dq;
-
-    std::atomic_int in{0};
-    std::atomic_int out{0};
-
     std::vector< int > input(loop_size_max);
     for (unsigned i=0; i<loop_size_max; ++i) {
         input[i] = i;
     }
 
+    Deque<int, queue_size> dq;
     std::vector< std::queue<int*> > private_q(n_thread);
 
-    c_push_fail.store(0);
-    c_pop_fail.store(0);
+    std::atomic_int in{0};
+    std::atomic_int out{0};
 
     auto lambda_push = [=,&dq,&input,&private_q,&in] (int a_th, unsigned loop_size) {
         for (unsigned i=0; i<loop_size; ++i) {
@@ -382,29 +465,37 @@ void test_thread_pool(const unsigned n_thread,
         }
     };
 
-    Thread_pool th_pool(n_thread);
-
-    th_pool.start();
+    c_push_fail.store(0);
+    c_pop_fail.store(0);
 
     std::vector<Task> push_task(outer_max*n_thread);
     std::vector<Task> pop_task(push_task.size());
 
+    unsigned count_ops = 0;
+
+    Thread_pool th_pool(n_thread);
+    th_pool.start();
+
     for (unsigned outer=0; outer<outer_max; ++outer) {
 
-        const unsigned loop_size = ((1+outer)*loop_size_max)/outer_max;
-        assert(loop_size <= loop_size_max);
+        const unsigned loop_size = 1 + (outer*loop_size_max)/outer_max;
+        ASSERT_GE(loop_size_max, loop_size);
         for (unsigned i_th=0; i_th<n_thread; ++i_th) {
             const unsigned idx = i_th + n_thread*outer;
-            assert(idx < push_task.size());
+            ASSERT_GT(push_task.size(), idx);
 
             push_task[idx] = std::bind(lambda_push, i_th, loop_size);
             th_pool.spawn(i_th, &push_task[idx]);
             pop_task [idx] = std::bind(lambda_pop,  i_th, loop_size);
             th_pool.spawn(i_th, &pop_task[idx]);
         }
+        count_ops += loop_size*n_thread;
     }
 
     th_pool.join();
+
+    printf("Rate of failed push: %g\n", float(c_push_fail.load()) / float(count_ops));
+    printf("Rate of failed pop:  %g\n", float( c_pop_fail.load()) / float(count_ops));
 
     for (auto pq : private_q) {
         ASSERT_TRUE(pq.empty());
@@ -415,13 +506,36 @@ void test_thread_pool(const unsigned n_thread,
     ASSERT_EQ(in.load(), out.load());
 }
 
+TEST(ThreadPool, OneThread)
+{
+    const int queue_size = 1<<5;
+    const unsigned n_thread = 1;
+    unsigned outer_max = 1<<3;
+    const unsigned loop_size_max = 1<<5;
+
+    test_thread_pool<queue_size>(n_thread,
+                                 outer_max,
+                                 loop_size_max);
+}
+
+TEST(ThreadPool, FewThreads)
+{
+    const int queue_size = 1<<5;
+    const unsigned n_thread = 4;
+    unsigned outer_max = 1<<3;
+    const unsigned loop_size_max = 1<<5;
+
+    test_thread_pool<queue_size>(n_thread,
+                                 outer_max,
+                                 loop_size_max);
+}
+
 TEST(ThreadPool, LongQueue)
 {
     const int queue_size = 1<<20;
     const unsigned n_thread = 1<<10;
     unsigned outer_max = 1<<3;
     const unsigned loop_size_max = 1<<8;
-
 
     test_thread_pool<queue_size>(n_thread,
                                  outer_max,
@@ -435,7 +549,6 @@ TEST(ThreadPool, MediumQueue)
     unsigned outer_max = 1<<3;
     const unsigned loop_size_max = 1<<8;
 
-
     test_thread_pool<queue_size>(n_thread,
                                  outer_max,
                                  loop_size_max);
@@ -447,7 +560,6 @@ TEST(ThreadPool, ShortQueue)
     const unsigned n_thread = 1<<10;
     unsigned outer_max = 1<<3;
     const unsigned loop_size_max = 1<<8;
-
 
     test_thread_pool<queue_size>(n_thread,
                                  outer_max,
