@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <iostream>
 #include <sstream>
@@ -73,35 +74,66 @@ private:
 
 #if 1
 #define LOG(out) do { \
-  LogMessage(__FILE__,__func__,__LINE__) << out; \
+LogMessage(__FILE__,__func__,__LINE__) << out; \
 } while (0)
 #else
 #define LOG(out)
 #endif
 
-void f_1()
-{
-}
+struct Profiling_Event {
+    std::string thread_id;
+    std::string name;
+    std::chrono::high_resolution_clock::time_point m_start, m_end;
 
-void f_x(int * x)
-{
-    --(*x);
-};
-
-void f_count(std::atomic_int * c)
-{
-    ++(*c);
-    std::this_thread::sleep_for(microseconds(20));
-};
-
-struct Fun_mv {
-    MatrixXd *A;
-    VectorXd *x, *y;
-    void operator()()
+    Profiling_Event()
     {
-        (*y) = (*A) * (*x);
+        LOG("Default Profiling_Event constructor called");
+    }
+
+    Profiling_Event(char * c) : name(c)
+    {
+        std::ostringstream string_id;
+        string_id << std::this_thread::get_id();
+        thread_id = string_id.str();
+        m_start = std::chrono::high_resolution_clock::now();
+    }
+
+    void end()
+    {
+        m_end = std::chrono::high_resolution_clock::now();
     }
 };
+
+struct Profiler {
+    list<Profiling_Event> events;
+    std::mutex mtx;
+
+    void push(Profiling_Event & a_pe)
+    {
+        std::lock_guard<std::mutex> lck(mtx);
+        events.push_back(a_pe);
+    }
+
+    void dump()
+    {
+        FILE* fp = std::fopen("prof.out", "w");
+        if(!fp) {
+            std::perror("File opening failed");
+            return;
+        }
+
+        auto it = events.begin();
+
+        for (; it != events.end(); ++it) {
+            auto d_start = std::chrono::duration<long long, std::nano>(it->m_start.time_since_epoch());
+            auto d_end   = std::chrono::duration<long long, std::nano>(it->m_end.time_since_epoch());
+            fprintf(fp,"tid: %s start: %ld end: %ld name: %s\n",it->thread_id.c_str(),
+                    d_start.count(),d_end.count(),it->name.c_str());
+        }
+
+        std::fclose(fp);
+    }
+} prof;
 
 struct Task : public Base_task {
     float m_priority = 0.0; // task priority
@@ -203,8 +235,8 @@ struct Thread_prio {
 
 struct Thread_team : public vector<Thread_prio*> {
     vector<Thread_prio> v_thread;
-    unsigned long n_query_spawn = 8; // Optimization parameter
-    unsigned long n_query_steal = 8; // Optimization parameter
+    unsigned long n_query_spawn = 4;  // Optimization parameter
+    unsigned long n_query_steal = 32; // Optimization parameter
     std::atomic_int ntasks; // number of ready tasks in any thread queue
     std::atomic_bool m_stop;
 
@@ -216,9 +248,6 @@ struct Thread_team : public vector<Thread_prio*> {
         }
         ntasks.store(0);
         m_stop.store(false);
-
-        assert(n_query_spawn >= 0);
-        assert(n_query_steal >= 0);
     }
 
     void start()
@@ -255,6 +284,7 @@ struct Thread_team : public vector<Thread_prio*> {
             for (unsigned long i=a_id+1; i<a_id+n_query; ++i) {
                 auto j = i%v_thread.size();
                 if (v_thread[j].m_empty.load()) {
+                    //LOG("Task spawned on alien thread");
                     id_ = static_cast<int>(j);
                     break;
                 }
@@ -275,6 +305,7 @@ struct Thread_team : public vector<Thread_prio*> {
             if (!thread_.m_empty.load()) {
                 std::unique_lock<std::mutex> lck(thread_.mtx);
                 if (!thread_.ready_queue.empty()) {
+                    //LOG("Task stolen");
                     Task * tsk = thread_.pop();
                     lck.unlock();
                     v_thread[a_id].spawn(tsk);
@@ -313,7 +344,10 @@ void spin(Thread_prio * a_thread)
                 return;
             }
             // Wait if queue is empty
+            Profiling_Event pe("wait");
             a_thread->cv.wait(lck);
+            pe.end();
+            prof.push(pe);
         }
     }
 }
@@ -450,6 +484,24 @@ struct Block_matrix : vector<MatrixXd*> {
     }
 };
 
+void f_1()
+{
+}
+
+void f_x(int * x)
+{
+    --(*x);
+};
+
+struct Fun_mv {
+    MatrixXd *A;
+    VectorXd *x, *y;
+    void operator()()
+    {
+        (*y) = (*A) * (*x);
+    }
+};
+
 TEST(TaskFlow, BasicTask)
 {
     Task t1;
@@ -507,6 +559,12 @@ TEST(TaskFlow, BasicTask)
     ASSERT_EQ(vec_y(0), 5);
     ASSERT_EQ(vec_y(1), 2);
 }
+
+void f_count(std::atomic_int* c)
+{
+    ++(*c);
+    std::this_thread::sleep_for(microseconds(20));
+};
 
 TEST(TaskFlow, Team)
 {
@@ -574,6 +632,158 @@ TEST(TaskFlow, Team)
     for(int nt=0; nt<n_thread; ++nt) {
         ASSERT_EQ(counter[nt].load(), max_count);
     }
+}
+
+void pass_the_bucket(vector<Task>* tsk, vector<std::atomic_int>* counter,
+                     Thread_team* team,
+                     const int size, const int n_thread, int th)
+{
+    Profiling_Event pe0("task");
+    ++(*counter)[th%size];
+    std::this_thread::sleep_for(microseconds(10));
+    pe0.end();
+    prof.push(pe0);
+    Profiling_Event pe1("spawn");
+    if (th%size!= size-1) {
+        team->spawn((th+1)%n_thread, &(*tsk)[th+1]);
+    }
+    pe1.end();
+    prof.push(pe1);
+}
+
+TEST(TaskFlow, Ring)
+{
+    const int n_thread = 2;
+    const int ring_size = 32;
+    const int max_count = 16;
+
+    // Create thread team
+    Thread_team team(n_thread);
+
+    ASSERT_EQ(team.v_thread.size(), n_thread);
+    ASSERT_EQ(team.ntasks.load(), 0);
+    ASSERT_EQ(team.m_stop.load(), false);
+
+    vector<std::atomic_int> counter(ring_size);
+
+    for(auto & c : counter) {
+        c.store(0);
+    }
+
+    vector<Task> tsk(ring_size*max_count);
+    int nt = 0;
+    for(int ic=0; ic<max_count; ++ic) {
+        for(int i=0; i<ring_size; ++i, ++nt) {
+            tsk[nt].set_function(bind(pass_the_bucket,
+                                      &tsk,&counter,&team,ring_size,n_thread,nt));
+        }
+    }
+
+    team.start();
+    for(int ic=0; ic<ring_size*max_count; ++ic) {
+        team.spawn(ic%n_thread, &tsk[ic]);
+    }
+    team.join();
+
+    ASSERT_GE(0, team.ntasks.load());
+
+    for(int i=0; i<ring_size; ++i) {
+        ASSERT_EQ(counter[i].load(), max_count*(i+1));
+    }
+
+    prof.dump();
+}
+
+void test_ring_flow(const int n_thread,const int ring_size, const int max_count, const int stride)
+{
+    const int n_task = ring_size * max_count;
+
+    vector<std::atomic_int> counter(ring_size);
+
+    for(auto & c : counter) {
+        c.store(0);
+    }
+
+    // Create thread team
+    Thread_team team(n_thread);
+
+    // Ring task flow
+    Task_flow ring_flow(&team,n_task,1,1);
+
+    ASSERT_EQ(ring_flow.team, &team);
+    ASSERT_EQ(ring_flow.task_grid.n0, n_task);
+    ASSERT_EQ(ring_flow.task_grid.n1, 1);
+    ASSERT_EQ(ring_flow.task_grid.n2, 1);
+
+    // Init task flow
+    ring_flow = task_flow_init()
+    .task_init([=,&ring_flow,&counter] (int3& idx, Task* a_tsk) -> int {
+        int i = idx[0];
+        a_tsk->set_function([=,&ring_flow,&counter] ()
+        {
+            ++counter[i%ring_size];
+            if (i < n_task-1 && i%stride != stride-1) {
+                ring_flow.decrement_wait_count({i+1,0,0});
+            }
+        });
+        return (i%stride == 0 ? 0 : 1); // wait_count
+    })
+    .compute_on([=] (int3& idx) {
+        return idx[0] % n_thread;
+    });
+
+    // Start team of threads
+    team.start();
+
+    // Create seed tasks and start
+    for (int i=0; i<n_task; i += stride) {
+        ring_flow.async({i,0,0});
+    }
+
+    // Wait for end of task queue execution
+    team.join();
+
+    ASSERT_GE(0, team.ntasks.load());
+
+    for(int i=0; i<ring_size; ++i) {
+        ASSERT_EQ(counter[i].load(), max_count);
+    }
+}
+
+TEST(TaskFlow, RingFlow1)
+{
+    const int n_thread = 1024;
+    const int ring_size = 1<<8;
+    const int max_count = 1<<4;
+    const int stride    = 1<<12;
+    test_ring_flow(n_thread,ring_size,max_count,stride);
+}
+
+TEST(TaskFlow, RingFlow2)
+{
+    const int n_thread = 1024;
+    const int ring_size = 1<<8;
+    const int max_count = 1<<4;
+    const int stride    = 1<<6;
+    test_ring_flow(n_thread,ring_size,max_count,stride);
+}
+
+TEST(TaskFlow, RingFlow3)
+{
+    const int n_thread = 1024;
+    const int ring_size = 1<<8;
+    const int max_count = 1<<4;
+    const int stride    = 1<<1;
+    test_ring_flow(n_thread,ring_size,max_count,stride);
+}
+
+TEST(TaskFlow, RingFlow4)
+{
+    const int n_thread = 1024;
+    const int ring_size = 1<<8;
+    const int max_count = 1<<4;
+    const int stride    = 1<<0;
+    test_ring_flow(n_thread,ring_size,max_count,stride);
 }
 
 TEST(TaskFlow, Eigen)
@@ -663,10 +873,114 @@ TEST(TaskFlow, Eigen)
 
 TEST(TaskFlow, GEMM)
 {
-    const int nb = 32; // number of blocks
-    const int b = 1;  // size of blocks
+    const int nb = 4; // number of blocks
+    const int b = 64;  // size of blocks
 
-    const int n_thread = 1024; // number of threads to use
+    const int n_thread = 8; // number of threads to use
+
+    const int n = b*nb; // matrix size
+
+    MatrixXd A(n,n), B(n,n);
+
+    // Initialize GEMM matrices
+    std::mt19937 mers_rand;
+    // Seed the engine
+    mers_rand.seed(2018);
+
+    for (int i=0; i<n; ++i) {
+        for (int j=0; j<n; ++j) {
+            A(i,j) = mers_rand()%3;
+            B(i,j) = mers_rand()%3;
+        }
+    }
+
+    MatrixXd C = A*B;
+
+    // Calculation using task flow
+    Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
+    
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j<nb; ++j) {
+            Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
+            Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
+            Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
+        }
+    }
+
+    // Create thread team
+    Thread_team team(n_thread);
+
+    // GEMM task flow
+    Task_flow gemm_g(&team,nb,nb,nb);
+    
+    auto compute_on_ij = [=] (int3& idx) {
+        return ( ( idx[0] + nb * idx[1] ) % n_thread );
+    };
+
+    // GEMM task flow
+    gemm_g = task_flow_init()
+    .task_init([=,&gemm_g,&Ab,&Bb,&Cb] (int3& idx, Task* a_tsk) -> int {
+        int i = idx[0];
+        int j = idx[1];
+        int k = idx[2];
+
+        a_tsk->set_function([=,&gemm_g,&Ab,&Bb,&Cb] ()
+        {
+            Profiling_Event pe("gemm");
+            *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
+            if (k < nb - 1) {
+                gemm_g.decrement_wait_count({i,j,k+1});
+            }
+            pe.end();
+            prof.push(pe);
+        });
+        return (/*k*/ idx[2] == 0 ? 0 : 1); // wait_count
+    })
+    .compute_on(compute_on_ij);
+
+    // Start team of threads
+    team.start();
+
+    auto start = high_resolution_clock::now();
+
+    // Create seed tasks and start
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j<nb; ++j) {
+            gemm_g.async({i,j,0});
+        }
+    }
+
+    // Wait for end of task queue execution
+    team.join();
+
+    auto end = high_resolution_clock::now();
+    auto duration_ = duration_cast<milliseconds>(end - start);
+    std::cout << "Elapsed time Task Flow: " << duration_.count() << "ms\n";
+
+    // Test output
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j <nb; ++j) {
+            ASSERT_EQ(*(Cb(i,j)), C.block(i*b,j*b,b,b));
+        }
+    }
+
+    for (int i=0; i<nb; ++i) {
+        for (int j=0; j <nb; ++j) {
+            delete Ab(i,j);
+            delete Bb(i,j);
+            delete Cb(i,j);
+        }
+    }
+
+    prof.dump();
+}
+
+TEST(TaskFlow, GEMMInit)
+{
+    const int nb = 4; // number of blocks
+    const int b = 32;  // size of blocks
+
+    const int n_thread = 8; // number of threads to use
 
     const int n = b*nb; // matrix size
 
@@ -688,7 +1002,7 @@ TEST(TaskFlow, GEMM)
     MatrixXd C = A*B;
     auto end = high_resolution_clock::now();
     auto duration_ = duration_cast<milliseconds>(end - start);
-    std::cout << "Elapsed time Eigen: " << duration_.count() << "\n";
+    std::cout << "Elapsed time Eigen: " << duration_.count() << "ms\n";
 
     // Calculation using task flow
     Block_matrix Ab(nb,nb), Bb(nb,nb), Cb(nb,nb);
@@ -724,6 +1038,7 @@ TEST(TaskFlow, GEMM)
         int j = idx[1];
         a_tsk->set_function([=,&ctx,&Ab,&Bb,&Cb] ()
         {
+            Profiling_Event pe("init mat");
             Ab(i,j) = new MatrixXd(A.block(i*b,j*b,b,b));
             Bb(i,j) = new MatrixXd(B.block(i*b,j*b,b,b));
             Cb(i,j) = new MatrixXd(MatrixXd::Zero(b,b));
@@ -731,6 +1046,8 @@ TEST(TaskFlow, GEMM)
                 ctx.gemm_g.decrement_wait_count({i,k,0});
                 ctx.gemm_g.decrement_wait_count({k,j,0});
             }
+            pe.end();
+            prof.push(pe);
         });
         return 0; // wait_count
     })
@@ -745,10 +1062,13 @@ TEST(TaskFlow, GEMM)
 
         a_tsk->set_function([=,&ctx,&Ab,&Bb,&Cb] ()
         {
+            Profiling_Event pe("gemm");
             *(Cb(i,j)) += *(Ab(i,k)) * *(Bb(k,j)); // GEMM
             if (k < nb - 1) {
                 ctx.gemm_g.decrement_wait_count({i,j,k+1});
             }
+            pe.end();
+            prof.push(pe);
         });
         return (/*k*/ idx[2] == 0 ? 2*nb : 1); // wait_count
     })
@@ -771,7 +1091,7 @@ TEST(TaskFlow, GEMM)
 
     end = high_resolution_clock::now();
     duration_ = duration_cast<milliseconds>(end - start);
-    std::cout << "Elapsed time Task Flow: " << duration_.count() << "\n";
+    std::cout << "Elapsed time Task Flow: " << duration_.count() << "ms\n";
 
     // Test output
     for (int i=0; i<nb; ++i) {
@@ -792,6 +1112,8 @@ TEST(TaskFlow, GEMM)
             delete Cb(i,j);
         }
     }
+
+    prof.dump();
 }
 
 int main(int argc, char **argv)

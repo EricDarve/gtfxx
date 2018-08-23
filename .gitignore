@@ -1,8 +1,12 @@
+*.dSYM
+*.prof
+*.orig
+*.pprof
+*.out
+.ipynb_checkpoints
+ctxx.xcodeproj
+
 ctxx
-ctxx.dSYM
-ctxx.prof
-main.cpp.orig
-ctxx.pprof
 test.cpp
 
 googletest-master/
@@ -11,6 +15,4 @@ libgtest.a
 output.txt
 
 deque
-deque.cpp.orig
-deque.dSYM/
 deque_v1.cpp

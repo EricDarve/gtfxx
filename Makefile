@@ -1,7 +1,7 @@
 # default
-#FLAGS=-std=c++11 -O2 -DNDEBUG
+FLAGS=-std=c++11 -O2 -DNDEBUG
 # debug
-FLAGS=-std=c++11 -g -Wall -Wextra -Wnon-virtual-dtor -pedantic
+#FLAGS=-std=c++11 -g -Wall -Wextra -Wnon-virtual-dtor -pedantic
 # google profiler
 #FLAGS=-DPROFILER -DNDEBUG -std=c++11 -O2 -lprofiler -Wl,-no_pie
 # gcov
@@ -14,11 +14,13 @@ CPP = icpc
 
 .PHONY : clean test
 
+all: ctxx
+
 deque : deque.cpp threadpool.hpp libgtest.a
 	$(CPP) $(FLAGS) -isystem googletest/include -pthread deque.cpp libgtest.a -o deque
 
-test :
-	./deque --gtest_repeat=50 --gtest_break_on_failure
+test : ctxx
+	./ctxx --gtest_repeat=1 --gtest_break_on_failure
 
 ctxx : main.cpp libgtest.a
 	$(CPP) $(INC) $(FLAGS) -isystem googletest/include -pthread main.cpp libgtest.a -o ctxx
