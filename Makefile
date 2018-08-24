@@ -16,14 +16,14 @@ CPP = icpc
 
 all: ctxx
 
-deque : deque.cpp threadpool.hpp libgtest.a
-	$(CPP) $(FLAGS) -isystem googletest/include -pthread deque.cpp libgtest.a -o deque
-
 test : ctxx
-	./ctxx --gtest_repeat=1 --gtest_break_on_failure
+	./ctxx --gtest_repeat=1000 --gtest_break_on_failure
 
 ctxx : main.cpp libgtest.a
 	$(CPP) $(INC) $(FLAGS) -isystem googletest/include -pthread main.cpp libgtest.a -o ctxx
+
+	deque : deque.cpp threadpool.hpp libgtest.a
+		$(CPP) $(FLAGS) -isystem googletest/include -pthread deque.cpp libgtest.a -o deque
 
 libgtest.a :
 	cd googletest; $(CPP) -isystem ./include -I. -pthread -c ./src/gtest-all.cc; ar -rv ../libgtest.a gtest-all.o

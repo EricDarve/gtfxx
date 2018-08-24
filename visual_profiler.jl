@@ -3,6 +3,7 @@ struct event_log
     n_duration::Int64
     n_timestamp::Array{Int64}
     n_task::Int64
+    n_thread::Int64
     name::Array{String}
     tid::Array{String}
     evtype::Array{Int}
@@ -45,7 +46,6 @@ function read_profile_log(file_name)
 
     task_map = Dict{String,Integer}()
 
-    n_thread = 0
     n_task = 0
 
     n_duration = 0
@@ -96,15 +96,14 @@ function read_profile_log(file_name)
     evstart /= 1e6
     evend /= 1e6
 
-    return event_log(n_event,n_duration,n_timestamp,n_task,
+    return event_log(n_event,n_duration,n_timestamp,n_task,n_thread,
         name,tid,
         evtype,evstart,evend,hover,
-        task_map,tid_map,timestamp_map)
+        task_map,tid_map,timestamp_map),
+        minimum(evstart), maximum(evend), n_event
 end
 
-function build_profile_plot(ev)
-
-    n_event_plot = ev.n_event
+function build_profile_plot(ev, tmin, tmax)
 
     rectangles = Array{ PlotlyBase.PlotlyAttribute{Dict{Symbol,Any}} }(ev.n_duration)
 
@@ -119,8 +118,10 @@ function build_profile_plot(ev)
 
     i_duration = 0
     i_timestamp = [0,0,0]
+    i_end = findlast(x -> x <= tmax, ev.evend)
+    i_end = max(1, i_end) # At least one entry should be kept
 
-    for i=1:n_event_plot
+    for i=1:i_end
         thread_id = ev.tid_map[ ev.tid[i] ]
         y0 = thread_id - 0.45
         x0 = ev.evstart[i]
@@ -137,7 +138,7 @@ function build_profile_plot(ev)
                 rect_color = "rgb(256, 256, 256)"
             end
             rect = attr(xref="x",yref="y",x0=x0,y0=y0,x1=x1,y1=y0+0.9,
-                        line_width=0.5,line_color="grey",fillcolor=rect_color)
+            line_width=0.5,line_color="grey",fillcolor=rect_color)
             rect[:shapes_type] = "rect"
 
             i_duration += 1
@@ -163,28 +164,43 @@ function build_profile_plot(ev)
     end
 
     trace = [
-        scatter(x=x_ht,y=y_ht,hovertext=hovertext_ht,
+        scatter(x=x_ht[1:i_duration],y=y_ht[1:i_duration],
+            hovertext=hovertext_ht[1:i_duration],
             mode="markers",marker_opacity=0,name="task",showlegend=false),
-        scatter(x=x_ts[1:ev.n_timestamp[1],1], y=y_ts[1:ev.n_timestamp[1],1],
-            hovertext=hovertext_ts[1:ev.n_timestamp[1],1],
+        scatter(x=x_ts[1:i_timestamp[1],1], y=y_ts[1:i_timestamp[1],1],
+            hovertext=hovertext_ts[1:i_timestamp[1],1],
             mode="markers",marker_symbol="circle-open",marker_size=12,name="spawn_self"),
-        scatter(x=x_ts[1:ev.n_timestamp[2],2], y=y_ts[1:ev.n_timestamp[2],2],
-            hovertext=hovertext_ts[1:ev.n_timestamp[2],2],
+        scatter(x=x_ts[1:i_timestamp[2],2], y=y_ts[1:i_timestamp[2],2],
+            hovertext=hovertext_ts[1:i_timestamp[2],2],
             mode="markers",marker_symbol="square-open",marker_size=12,name="spawn_other"),
-        scatter(x=x_ts[1:ev.n_timestamp[3],3], y=y_ts[1:ev.n_timestamp[3],3],
-            hovertext=hovertext_ts[1:ev.n_timestamp[3],3],
+        scatter(x=x_ts[1:i_timestamp[3],3], y=y_ts[1:i_timestamp[3],3],
+            hovertext=hovertext_ts[1:i_timestamp[3],3],
             mode="markers",marker_symbol="diamond-open",marker_size=12,name="steal")
     ]
 
-    layout = Layout(yaxis_zeroline=false,yaxis_dtick=1,yaxis_ticksuffix="  ",
+    dt = tmax - tmin
+    margin_t = dt*0.01
+    layout = Layout(yaxis_zeroline=false,yaxis_ticksuffix="  ",
         hovermode="closest",
-        shapes=rectangles,
-        xaxis_title="time [ms]", yaxis_title="thread id"
+        shapes=rectangles[1:i_duration],
+        xaxis_title="time [ms]", yaxis_title="thread id",
+        xaxis_range=[tmin - margin_t, tmax + margin_t],
+        yaxis_dtick=1, yaxis_range=[-1.9, ev.n_thread - 1.1]
     )
 
     return plot(trace,layout)
 end
 
+function build_profile_plot(ev)
+    build_profile_plot(ev, minimum(ev.evstart), maximum(ev.evend))
+end
+
+function build_profile_plot(ev, n_event_plot)
+    tmax = ev.evend[ min(length(ev.evend), n_event_plot) ]
+    build_profile_plot(ev, minimum(ev.evstart), tmax)
+end
+
 function profiler_plot(file_name)
-    return build_profile_plot(read_profile_log(file_name))
+    ev, tmin, tmax, n_event = read_profile_log(file_name)
+    return build_profile_plot(ev, tmin, tmax)
 end

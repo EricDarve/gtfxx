@@ -176,7 +176,7 @@ struct Profiler {
             return;
         }
 
-        fprintf(fp,"nthreads %ld\n",thread_id_map.size());
+        fprintf(fp,"nthreads %d\n",thread_id_map.size());
         for (auto it = thread_id_map.begin(); it != thread_id_map.end(); ++it) {
             fprintf(fp,"tidmap %s %d\n",it->first.c_str(),it->second);
         }
@@ -184,12 +184,11 @@ struct Profiler {
         for (auto it = events.begin(); it != events.end(); ++it) {
             auto d_start = std::chrono::duration<long long, std::nano>(it->m_start.time_since_epoch());
             switch (it->ev_type) {
-            case Profiling_Event::duration : {
+            case Profiling_Event::duration :
                 auto d_end   = std::chrono::duration<long long, std::nano>(it->m_stop.time_since_epoch());
                 fprintf(fp,"tid %s start %ld end %ld name %s\n",it->thread_id.c_str(),
                         d_start.count(),d_end.count(),it->name.c_str());
-            }
-            break;
+                break;
             case Profiling_Event::timepoint :
                 fprintf(fp,"tid %s timestamp %ld name %s\n",it->thread_id.c_str(),
                         d_start.count(),it->name.c_str());
@@ -261,7 +260,7 @@ struct Thread_prio {
         th = thread(spin, this); // Execute tasks in queue
     };
 
-    // Add new task to queue; thread safe
+    // Add new task to queue
     void spawn(Task * a_t)
     {
         std::lock_guard<std::mutex> lck(mtx);
@@ -270,7 +269,6 @@ struct Thread_prio {
         //cv.notify_one(); // Wake up thread
     };
 
-    // Not thread safe
     Task* pop()
     {
         if (ready_queue.size() == 1) m_empty.store(true);
@@ -281,7 +279,6 @@ struct Thread_prio {
 
     void notify()
     {
-        LOG("notify should no longer be needed");
         std::lock_guard<std::mutex> lck(mtx);
         cv.notify_one(); // Wake up thread
     }
@@ -309,7 +306,6 @@ struct Thread_team : public vector<Thread_prio*> {
 
     void wake_all()
     {
-        LOG("wake_all should no longer be needed");
         if (atomic_fetch_sub(&ntasks,1) == 0) {
             for (auto& th : v_thread) th.notify();
         }
@@ -335,46 +331,39 @@ struct Thread_team : public vector<Thread_prio*> {
     void join()
     {
         m_stop.store(true);
-//        if (ntasks.load() == 0) {
-//            wake_all();
-//        }
+        if (ntasks.load() == 0) {
+            wake_all();
+        }
         for (auto& th : v_thread) th.join();
     }
 
     void spawn(const int a_id, Task * a_task)
     {
         assert(a_id >= 0 && static_cast<unsigned long>(a_id) < v_thread.size());
-        
-        ++ntasks;
-
         int id_ = a_id;
-
         // Check if queue is empty
         if (!v_thread[a_id].m_empty.load()) {
-            // Thread is already busy
-            // Are there other threads that are idle?
+            // Check whether other threads have empty queues
             const unsigned long n_query = min(1+n_query_spawn, v_thread.size());
             for (unsigned long i=a_id+1; i<a_id+n_query; ++i) {
                 auto j = i%v_thread.size();
                 if (v_thread[j].m_empty.load()) {
-                    // We have found an idle thread
                     id_ = static_cast<int>(j);
                     break;
                 }
             }
         }
-
-        {
-            char timestamp_message[80];
-            if (id_ == a_id) {
-                sprintf(timestamp_message,"spawn_self %d",a_id);
-            }
-            else {
-                sprintf(timestamp_message,"spawn_other %d to %d",a_id,id_);
-            }
-            profiler.timestamp(timestamp_message);
+        char timestamp_message[80];
+        if (id_ == a_id) {
+            sprintf(timestamp_message,"spawn_self %d",a_id);
         }
-        
+        else {
+            sprintf(timestamp_message,"spawn_other %d to %d",a_id,id_);
+        }
+        profiler.timestamp(timestamp_message);
+        // Note that because we are not using locks, the queue may no longer be empty.
+        // But this implementation is more efficient than using locks.
+        ++ntasks;
         v_thread[id_].spawn(a_task);
     }
 
@@ -387,7 +376,6 @@ struct Thread_team : public vector<Thread_prio*> {
             if (!thread_.m_empty.load()) {
                 std::unique_lock<std::mutex> lck(thread_.mtx);
                 if (!thread_.ready_queue.empty()) {
-                    // We have found a non empty task queue
                     profiler.timestamp("steal");
                     Task * tsk = thread_.pop();
                     lck.unlock();
@@ -404,21 +392,17 @@ void spin(Thread_prio * a_thread)
 {
     auto pe = profiler.start("overhead");
     std::unique_lock<std::mutex> lck(a_thread->mtx);
-
     while (true) {
         while (!a_thread->ready_queue.empty()) {
             Task * tsk = a_thread->pop();
             lck.unlock();
             profiler.stop(pe);
-
             (*tsk)();
-
             pe = profiler.start("overhead");
             --(a_thread->team->ntasks);
             if (tsk->m_delete) delete tsk;
             lck.lock();
         }
-
         lck.unlock();
 
         // Try to steal a task
@@ -426,32 +410,26 @@ void spin(Thread_prio * a_thread)
 
         lck.lock();
         while (a_thread->ready_queue.empty()) {
-            lck.unlock();
-
             // Return if stop=true and no tasks are left
             if (a_thread->team->m_stop.load() && a_thread->team->ntasks.load() <= 0) {
-//                lck.unlock();
-
+                lck.unlock();
                 profiler.stop(pe);
-                
                 // Wake up all threads and exits
 //                a_thread->team->wake_all();
-
                 return;
             }
-
-            // When queue is empty, yield or wait
+            // Wait if queue is empty
             profiler.stop(pe);
             pe = profiler.start("wait");
 
 //            a_thread->cv.wait(lck);
 
+            lck.unlock();
             std::this_thread::yield();
+            lck.lock();
 
             profiler.stop(pe);
             pe = profiler.start("overhead");
-
-            lck.lock();
         }
     }
 }
@@ -674,15 +652,13 @@ TEST(TaskFlow, BasicTask)
 
 void f_count(std::atomic_int* c)
 {
-    auto pe = profiler.start("team_task");
     ++(*c);
     std::this_thread::sleep_for(microseconds(20));
-    profiler.stop(pe);
 };
 
 TEST(TaskFlow, Team)
 {
-    const int n_thread = 16;
+    const int n_thread = 1024;
     const int max_count = 10;
 
     // Create thread team
@@ -702,12 +678,9 @@ TEST(TaskFlow, Team)
     for(int nt=0; nt<n_thread; ++nt) {
         tsk[nt].set_function(bind(f_count, &counter[nt]));
     }
-    
-    profiler.open("team_sp0.out");
 
     {
         team.start();
-        profiler.map_team_threads(team);
         auto start = high_resolution_clock::now();
         for(int it=0; it < max_count; ++it) {
             for(int nt=0; nt<n_thread; ++nt) {
@@ -726,10 +699,6 @@ TEST(TaskFlow, Team)
     for(int nt=0; nt<n_thread; ++nt) {
         ASSERT_EQ(counter[nt].load(), max_count);
     }
-    
-    profiler.dump();
-    
-    profiler.open("team_sp_all.out");
 
     for(auto & c : counter) {
         c.store(0);
@@ -737,7 +706,6 @@ TEST(TaskFlow, Team)
 
     {
         team.start();
-        profiler.map_team_threads(team);
         auto start = high_resolution_clock::now();
         for(int it=0; it < max_count; ++it) {
             for(int nt=0; nt<n_thread; ++nt) {
@@ -754,8 +722,6 @@ TEST(TaskFlow, Team)
     for(int nt=0; nt<n_thread; ++nt) {
         ASSERT_EQ(counter[nt].load(), max_count);
     }
-    
-    profiler.dump();
 }
 
 void pass_the_bucket(vector<Task>* tsk, vector<std::atomic_int>* counter,
@@ -874,7 +840,7 @@ void test_ring_flow(const int n_thread,const int ring_size, const int max_count,
 
 TEST(TaskFlow, RingFlow1)
 {
-    const int n_thread = 1<<5;
+    const int n_thread = 1024;
     const int ring_size = 1<<8;
     const int max_count = 1<<4;
     const int stride    = 1<<12;
@@ -883,7 +849,7 @@ TEST(TaskFlow, RingFlow1)
 
 TEST(TaskFlow, RingFlow2)
 {
-    const int n_thread = 1<<5;
+    const int n_thread = 1024;
     const int ring_size = 1<<8;
     const int max_count = 1<<4;
     const int stride    = 1<<6;
@@ -892,7 +858,7 @@ TEST(TaskFlow, RingFlow2)
 
 TEST(TaskFlow, RingFlow3)
 {
-    const int n_thread = 1<<5;
+    const int n_thread = 1024;
     const int ring_size = 1<<8;
     const int max_count = 1<<4;
     const int stride    = 1<<1;
@@ -901,7 +867,7 @@ TEST(TaskFlow, RingFlow3)
 
 TEST(TaskFlow, RingFlow4)
 {
-    const int n_thread = 1<<5;
+    const int n_thread = 1024;
     const int ring_size = 1<<8;
     const int max_count = 1<<4;
     const int stride    = 1<<0;
@@ -998,7 +964,7 @@ TEST(TaskFlow, GEMM)
     const int nb = 4; // number of blocks
     const int b = 32;  // size of blocks
 
-    const int n_thread = 4; // number of threads to use
+    const int n_thread = 2; // number of threads to use
 
     const int n = b*nb; // matrix size
 
@@ -1107,7 +1073,7 @@ TEST(TaskFlow, GEMMInit)
     const int nb = 4; // number of blocks
     const int b = 32;  // size of blocks
 
-    const int n_thread = 16; // number of threads to use
+    const int n_thread = 8; // number of threads to use
 
     const int n = b*nb; // matrix size
 
