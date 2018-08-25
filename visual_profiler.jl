@@ -49,8 +49,8 @@ function read_profile_log(file_name)
     n_task = 0
 
     n_duration = 0
-    n_timestamp = [0,0,0] # spawn_self, spawn_other, steal
-    timestamp_map = Dict("spawn_self" => 1, "spawn_other" => 2, "steal" => 3)
+    n_timestamp = [0,0,0] # spawn_to, spawn_other, steal
+    timestamp_map = Dict("spawn_to" => 1, "spawn_other" => 2, "steal" => 3)
 
     for i=1:n_event
         splt = split(lines[i+n_header])
@@ -68,9 +68,7 @@ function read_profile_log(file_name)
             evend[i] = evstart[i]
             name[i] = splt[6]
             hover[i] = ""
-            if (name[i] == "spawn_other")
-                hover[i] = splt[7] * " " * splt[8] * " " * splt[9] * " "
-            elseif (name[i] == "spawn_self")
+            if (name[i] == "spawn_other" || name[i] == "spawn_to" || name[i] == "steal")
                 hover[i] = splt[7] * " "
             end
 
@@ -131,11 +129,11 @@ function build_profile_plot(ev, tmin, tmax)
         if (ev.evtype[i] == 0)
             rect_color = @sprintf("hsla(%3d, 100%%, 50%%, 0.4)",360.0*task_name/(1+ev.n_task))
             if (ev.name[i] == "overhead")
-                rect_color = "rgb(128, 128, 128)"
+                rect_color = "rgba(128, 128, 128, 0.4)"
             elseif (ev.name[i] == "dependency")
-                rect_color = "rgb(192, 192, 192)"
+                rect_color = "rgba(192, 192, 192, 0.4)"
             elseif (ev.name[i] == "wait")
-                rect_color = "rgb(256, 256, 256)"
+                rect_color = "rgba(256, 256, 256, 0.4)"
             end
             rect = attr(xref="x",yref="y",x0=x0,y0=y0,x1=x1,y1=y0+0.9,
             line_width=0.5,line_color="grey",fillcolor=rect_color)
@@ -169,7 +167,7 @@ function build_profile_plot(ev, tmin, tmax)
             mode="markers",marker_opacity=0,name="task",showlegend=false),
         scatter(x=x_ts[1:i_timestamp[1],1], y=y_ts[1:i_timestamp[1],1],
             hovertext=hovertext_ts[1:i_timestamp[1],1],
-            mode="markers",marker_symbol="circle-open",marker_size=12,name="spawn_self"),
+            mode="markers",marker_symbol="circle-open",marker_size=12,name="spawn_to"),
         scatter(x=x_ts[1:i_timestamp[2],2], y=y_ts[1:i_timestamp[2],2],
             hovertext=hovertext_ts[1:i_timestamp[2],2],
             mode="markers",marker_symbol="square-open",marker_size=12,name="spawn_other"),
