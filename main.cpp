@@ -667,8 +667,8 @@ void f_count(std::atomic_int* c)
 
 TEST(TaskFlow, Team)
 {
-    const int n_thread = 16;
-    const int max_count = 10;
+    const int n_thread = 2;
+    const int max_count = 100;
 
     // Create thread team
     Thread_team team(n_thread);
@@ -1202,16 +1202,27 @@ TEST(TaskFlow, GEMMInit)
     .compute_on(compute_on_ij);
     
     profiler.open("gemm_w_init.out");
+    
+//    Task tsk;
+//    tsk.set_function([=,&ctx] () {
+//        for (int j=0; j<nb; ++j) {
+//            for (int i=0; i<nb; ++i) {
+//                ctx.init_mat.async({i,j,0});
+//            }
+//        }
+//    });
 
     // Start team of threads
     team.start();
     profiler.map_team_threads(team);
 
     start = high_resolution_clock::now();
+    
+//    team.spawn(0, &tsk);
 
     // Create seed tasks and start
-    for (int i=0; i<nb; ++i) {
-        for (int j=0; j<nb; ++j) {
+    for (int j=0; j<nb; ++j) {
+        for (int i=0; i<nb; ++i) {
             ctx.init_mat.async({i,j,0});
         }
     }
@@ -1225,11 +1236,6 @@ TEST(TaskFlow, GEMMInit)
 
     // Test output
     for (int i=0; i<nb; ++i) {
-        for (int j=0; j <nb; ++j) {
-            if ( *(Cb(i,j)) != C.block(i*b,j*b,b,b) ) {
-                LOG(i << " " << j << " = " << *(Cb(i,j)) << " " << C.block(i*b,j*b,b,b));
-            }
-        }
         for (int j=0; j <nb; ++j) {
             ASSERT_EQ(*(Cb(i,j)), C.block(i*b,j*b,b,b));
         }
