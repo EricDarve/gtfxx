@@ -11,7 +11,9 @@ cmake ..
 make
 make install
 </pre>
-This will create an executable in the bin/ directory. The source files are in src/. build/ contains compiled object files and cmake files.
+This will create an executable in the bin/ directory. The source files are in <pre>src/</pre>. 
+
+<pre>build/<pre> contains compiled object files and cmake files.
 
 [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home) must be installed.
 
@@ -27,4 +29,4 @@ to match your installation of UPC++. See
 cd <upcxx-source-path>
 ./install <upcxx-install-path>
 </pre>
-in the [installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md)
+in the [installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md).
