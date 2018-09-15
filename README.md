@@ -5,9 +5,13 @@ A library that performs calculations on distributed and shared memory machines u
 
 You can compile the test files using:
 <pre>
-cmake .
+mkdir build
+cd build
+cmake ..
 make
+make install
 </pre>
+This will create an executable in the bin/ directory. The source files are in src/. build/ contains compiled object files and cmake files.
 
 [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home) must be installed.
 
