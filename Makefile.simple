@@ -1,0 +1,46 @@
+#g++   -I/usr/local/Cellar/eigen/3.3.4/include/eigen3  -DUPCXX_ASSERT_ENABLED=0 -DUPCXX_BACKEND=1 -DUPCXX_BACKEND_GASNET_SEQ=1 -DUPCXX_LPC_INBOX_lockfree=1 -D_GNU_SOURCE=1 -DGASNET_SEQ -I/Users/darve/git/ctxx/upcxx/gasnet.opt/include -I/Users/darve/git/ctxx/upcxx/gasnet.opt/include/smp-conduit -I/Users/darve/git/ctxx/upcxx/upcxx.O3.gasnet_seq.smp/include -isystem googletest/include -O3 -Wno-unused -Wunused-result -Wno-unused-parameter -Wno-address -Wl,-multiply_defined,suppress -pthread   -std=gnu++11 -o CMakeFiles/gtfxx.dir/main.cpp.o -c /Users/darve/git/ctxx/main.cpp
+
+
+# default
+CXXFLAGS = -std=c++11 -DNDEBUG
+# debug
+#FLAGS=-std=c++11 -g -Wall -Wextra -Wnon-virtual-dtor -pedantic
+# google profiler
+#FLAGS=-DPROFILER -DNDEBUG -std=c++11 -O2 -lprofiler -Wl,-no_pie
+# gcov
+#FLAGS=-std=c++11 -O2 -DNDEBUG -fprofile-arcs -ftest-coverage
+
+INCLUDES = -I/usr/local/Cellar/eigen/3.3.4/include/eigen3 -isystem googletest/include
+LIBS = -pthread
+
+UPCXX_INSTALL=upcxx
+UPCXX_THREADMODE=seq
+
+ENV = env UPCXX_THREADMODE=$(UPCXX_THREADMODE)
+CXX = $(shell $(ENV) $(UPCXX_INSTALL)/bin/upcxx-meta CXX)
+PPFLAGS = $(shell $(ENV) $(UPCXX_INSTALL)/bin/upcxx-meta PPFLAGS)
+LDFLAGS = $(shell $(ENV) $(UPCXX_INSTALL)/bin/upcxx-meta LDFLAGS)
+LIBFLAGS = $(shell $(ENV) $(UPCXX_INSTALL)/bin/upcxx-meta LIBFLAGS)
+
+LIBS = libgtest.a
+
+.PHONY : clean test
+
+all: gtfxx
+
+test : gtfxx
+	export GASNET_PSHM_NODES=2; ./gtfxx --gtest_filter=GTF.* --gtest_repeat=1 --gtest_break_on_failure
+
+gtfxx : main.cpp libgtest.a
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PPFLAGS) $(LDFLAGS) $(LIBFLAGS) main.cpp $(LIBS) -o $@
+
+deque : deque.cpp threadpool.hpp libgtest.a
+	$(CXX) $(FLAGS) -isystem googletest/include -pthread deque.cpp libgtest.a -o deque
+
+libgtest.a :
+	cd googletest; $(CXX) -isystem ./include -I. -pthread -c ./src/gtest-all.cc; ar -rv ../libgtest.a gtest-all.o
+
+clean:
+	rm -f gtfxx deque libgtest.a
+
+.PHONY: clean all
