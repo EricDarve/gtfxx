@@ -8,6 +8,7 @@ target_compile_features(gtfxx PUBLIC cxx_std_11)
 
 set(UPCXX_INSTALL "/Users/darve/git/ctxx/upcxx")
 set(UPCXX_THREADMODE "par")
+
 set(ENV "UPCXX_THREADMODE=${UPCXX_THREADMODE}")
 
 # Run UPCXX shell script to get required compile flags
