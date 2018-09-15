@@ -3,15 +3,25 @@
 *.orig
 *.pprof
 *.out
-.ipynb_checkpoints
-ctxx.xcodeproj
+*.cbp
 
-ctxx
+.ipynb_checkpoints
+.idea
+
+gtfxx
 test.cpp
 
-googletest-master/
-googletest/gtest-all.o
-libgtest.a
+CMakeFiles
+CMakeCache.txt
+cmake_install.cmake
+
+googletest-build/
+googletest-download/
+googletest-src/
+
+#googletest-master/
+#googletest/gtest-all.o
+#libgtest.a
 output.txt
 
 deque
