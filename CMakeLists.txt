@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.11)
 project(gtfxx LANGUAGES CXX)
-add_executable(gtfxx main.cpp)
+add_executable(gtfxx src/main.cpp)
 target_compile_features(gtfxx PUBLIC cxx_std_11)
 
 # -------------------------
@@ -76,9 +76,14 @@ target_compile_options(gtfxx PRIVATE ${PPFLAGS}) # UPCXX pre-processing flags
 
 # Include directories for compilation
 target_include_directories(gtfxx PRIVATE /usr/local/Cellar/eigen/3.3.4/include/eigen3)
+target_include_directories(gtfxx PRIVATE "src") # src contains header files as well
 
 # Options for linking
 target_link_libraries(gtfxx ${LDFLAGS}) # UPCXX linker flags
 # Required libraries for linking
 target_link_libraries(gtfxx ${LIBS}) # UPCXX libraries
 target_link_libraries(gtfxx gtest_main) # Google test library
+
+# Installation Options
+set(CMAKE_INSTALL_PREFIX "../") # Installing under "bin/" in the git root directory of the user
+install(TARGETS gtfxx DESTINATION bin)
