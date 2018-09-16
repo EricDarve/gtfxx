@@ -78,6 +78,96 @@ LogMessage(__FILE__,__func__,__LINE__) << out; \
 #define LOG(out)
 #endif
 
+/// Exception type for assertion failures
+class AssertionFailureException : public std::exception {
+private:
+    const char *expression;
+    const char *file;
+    int line;
+    std::string message;
+    std::string report;
+
+public:
+    // Helper class for formatting assertion message
+    class StreamFormatter {
+    private:
+        std::ostringstream stream;
+
+    public:
+        operator std::string() const {
+            return stream.str();
+        }
+
+        template<typename T>
+        StreamFormatter &operator<<(const T &value) {
+            stream << value;
+            return *this;
+        }
+    };
+
+    // Log error before throwing
+    void LogError() {
+        std::cerr << report << std::endl;
+    }
+
+    // Construct an assertion failure exception
+    AssertionFailureException(const char *expression, const char *file, int line, const std::string &message)
+            : expression(expression), file(file), line(line), message(message) {
+        std::ostringstream outputStream;
+
+        if (!message.empty()) {
+            outputStream << message << ": ";
+        }
+
+        std::string expressionString = expression;
+
+        if (expressionString == "false" || expressionString == "0" || expressionString == "FALSE") {
+            outputStream << "Unreachable code assertion";
+            /* We asserted false to abort at a line that code code
+             * should not be able to reach. */
+        } else {
+            outputStream << "Assertion '" << expression << "'";
+        }
+
+        outputStream << " failed in file '" << file << "' line " << line;
+        report = outputStream.str();
+
+        LogError();
+    }
+
+    // The assertion message
+    virtual const char *what() const throw() {
+        return report.c_str();
+    }
+
+    // The expression which was asserted to be true
+    const char *Expression() const throw() {
+        return expression;
+    }
+
+    // Source file
+    const char *File() const throw() {
+        return file;
+    }
+
+    // Source line
+    int Line() const throw() {
+        return line;
+    }
+
+    // Description of failure
+    const char *Message() const throw() {
+        return message.c_str();
+    }
+
+    ~AssertionFailureException() throw() {
+    }
+};
+
+
+/// Assert that EXPRESSION evaluates to true, otherwise raise AssertionFailureException with associated MESSAGE (which may use C++ stream-style message formatting)
+#define throw_assert(EXPRESSION, MESSAGE) if(!(EXPRESSION)) { throw AssertionFailureException(#EXPRESSION, __FILE__, __LINE__, (AssertionFailureException::StreamFormatter() << MESSAGE)); }
+
 struct Profiling_Event {
     enum event {
         uninitialized, duration, timepoint
@@ -200,27 +290,8 @@ struct Profiler {
 struct Task : public Base_task {
     float m_priority = 0.0; // task priority
 
-    // TODO: this should be made a template parameter
-    bool m_delete = false;
-    // whether the object should be deleted after running the function
-    // to completion.
-
-    // TODO: move to Task_flow
-    std::atomic_int m_wait_count; // number of dependencies
-
-    Task() : m_wait_count(-1) {}
-    // m_wait_count must be initialized at -1
-
-    void set_function(const Base_task &a_f, float a_priority = 0.0, bool a_del = false) {
-        Base_task::operator=(a_f);
-        m_priority = a_priority;
-        m_delete = a_del;
-    }
-
-    Task &operator=(const Base_task &a_f) {
-        Base_task::operator=(a_f);
-        return *this;
-    }
+    Task(const Base_task &&a_f, float a_priority = 0.0) :
+            Base_task(a_f), m_priority(a_priority) {}
 };
 
 // Task comparison based on their priorities
@@ -374,7 +445,9 @@ void spin_task(Thread_prio *a_thread) {
 
             pe = profiler.start("overhead");
             --(a_thread->team->ntasks);
-            if (tsk->m_delete) delete tsk;
+
+            // Free memory
+            delete tsk;
 
             lck.lock();
         }
@@ -416,15 +489,23 @@ void Thread_prio::start() {
     th = thread(spin_task, this); // Execute tasks in queue
 }
 
-struct Matrix3_task : vector<Task> {
+typedef std::atomic_int Promise;
+
+struct Matrix3_promise : vector<Promise> {
     int n0, n1, n2;
 
-    Matrix3_task() : n0(0), n1(0), n2(0) {};
+    Matrix3_promise() : n0(0), n1(0), n2(0) {};
 
-    Matrix3_task(int a_n0, int a_n1, int a_n2) : vector<Task>(a_n0 * a_n1 * a_n2),
-                                                 n0(a_n0), n1(a_n1), n2(a_n2) {};
+    // Initialize with -1
+    Matrix3_promise(int a_n0, int a_n1, int a_n2) :
+            vector<Promise>(a_n0 * a_n1 * a_n2),
+            n0(a_n0), n1(a_n1), n2(a_n2) {
+        for (int i = 0; i < n0 * n1 * n2; ++i) {
+            operator[](i).store(-1);
+        }
+    };
 
-    Task &operator()(int i, int j, int k) {
+    std::atomic_int &operator()(int i, int j, int k) {
         assert(i >= 0 && i < n0);
         assert(j >= 0 && j < n1);
         assert(k >= 0 && k < n2);
@@ -435,38 +516,43 @@ struct Matrix3_task : vector<Task> {
 typedef array<int, 3> int3;
 
 struct Dependency_flow {
-    typedef std::function<int(int3 &, Task *)> Init_task;
+    typedef std::function<int(const int3)> Dependency_count;
+    typedef std::function<void(const int3)> Build_task;
 
     // Thread team
     Thread_team *team = nullptr;
 
     explicit Dependency_flow(Thread_team *a_team) : team(a_team) {}
 
-    // How to initialize a task
-    Init_task m_init;
+    // How to calculate the number of dependencies for promises
+    Dependency_count m_dep_count = nullptr;
+
+    // How to construct a task
+    Build_task m_build_task = nullptr;
 
     virtual ~Dependency_flow() = default;
 
     // Decrement the dependency counter and spawn task if ready
-    virtual void decrement_wait_count(int3) = 0;
+    virtual void fulfill_promise(int3) = 0;
 };
 
 struct Task_flow : public Dependency_flow {
 
-    /* TODO: we don't need to store the function
-     * We just need to know what function to call for a given int3.
-     * Then this function can be enqueued directly to a thread.
-     * Only one atomic for dependencies needs to be stored. */
     typedef std::function<int(int3 &)> Map_task;
 
-    // Task are indexed using a sparse 3D grid
-    Matrix3_task task_grid;
+    // Tasks are indexed using a 3D grid of atomic dependencies
+    Matrix3_promise promise_grid;
 
     // Mapping from task index to thread id
-    Map_task m_map;
+    Map_task m_map = nullptr;
 
-    Task_flow &set_task_init(Init_task a_init) {
-        m_init = std::move(a_init);
+    Task_flow &dependency_count(Dependency_count f) {
+        m_dep_count = std::move(f);
+        return *this;
+    }
+
+    Task_flow &define_task(Build_task f) {
+        m_build_task = std::move(f);
         return *this;
     }
 
@@ -475,51 +561,61 @@ struct Task_flow : public Dependency_flow {
     }
 
     Task_flow(Thread_team *a_team, int n0, int n1, int n2) :
-            Dependency_flow(a_team), task_grid(n0, n1, n2) {}
+            Dependency_flow(a_team), promise_grid(n0, n1, n2) {}
 
-    // spawn a task
+    // Spawn a task from index
     void async(int3);
 
+    // Spawn a task that is already initialized
     void async(int3, Task *);
 
     // Decrement the dependency counter and spawn task if ready
-    void decrement_wait_count(int3) override;
+    void fulfill_promise(int3) override;
 };
 
 // Spawn task
 void Task_flow::async(int3 idx, Task *a_tsk) {
+    // Basic sanity check
+    assert(team != nullptr);
+    assert(a_tsk != nullptr);
+    assert(m_map != nullptr);
+    assert(m_map(idx) >= 0);
+
     team->spawn(/*task map*/ m_map(idx), a_tsk);
 }
 
-// Initialize task and spawn it
+// Enqueue task immediately
 void Task_flow::async(int3 idx) {
-    auto t_ = &task_grid(idx[0], idx[1], idx[2]);
-    m_init(idx, t_);
-    async(idx, t_);
+    throw_assert(this->m_build_task != nullptr,
+                 "define_task() was not called; the task cannot be defined");
+    Build_task f = this->m_build_task;
+    async(idx, new Task([f, idx]() { f(idx); }));
 }
 
-void Task_flow::decrement_wait_count(int3 idx) {
-    /* It's a bug to call this function more times than
-     * wait_count returned by m_init(). */
+void Task_flow::fulfill_promise(int3 idx) {
+    assert(0 <= idx[0] && idx[0] < promise_grid.n0);
+    assert(0 <= idx[1] && idx[1] < promise_grid.n1);
+    assert(0 <= idx[2] && idx[2] < promise_grid.n2);
 
-    assert(0 <= idx[0] && idx[0] < task_grid.n0);
-    assert(0 <= idx[1] && idx[1] < task_grid.n1);
-    assert(0 <= idx[2] && idx[2] < task_grid.n2);
-
-    auto t_ = &task_grid(idx[0], idx[1], idx[2]);
+    auto atomic_count = &(promise_grid(idx[0], idx[1], idx[2]));
 
     // Decrement counter
-    int wait_count = std::atomic_fetch_sub(&(t_->m_wait_count), 1);
+    int wait_count = std::atomic_fetch_sub(atomic_count, 1);
 
     if (wait_count == -1) { // Uninitialized task
-        int wait_count_init = m_init(idx, t_);
-        wait_count = std::atomic_fetch_add(&(t_->m_wait_count), wait_count_init);
+        throw_assert(m_dep_count != nullptr,
+                "dependency_count() was not called; the promise cannot be initialized");
+        int wait_count_init = m_dep_count(idx);
+        wait_count = std::atomic_fetch_add(atomic_count, wait_count_init);
         // wait_count = value before add operation
         wait_count += wait_count_init + 1;
     }
 
     if (wait_count == 0) { // task is ready to run
-        async(idx, t_);
+        throw_assert(this->m_build_task != nullptr,
+                     "define_task() was not called; the task cannot be defined");
+        Build_task f = this->m_build_task;
+        async(idx, new Task([f, idx]() { f(idx); }));
     }
 }
 
@@ -593,7 +689,9 @@ void spin_comm(Thread_comm *a_thread) {
             (*tsk)(); // Issue active message
 
             --(a_thread->team->ntasks);
-            if (tsk->m_delete) delete tsk;
+
+            // Free memory
+            delete tsk;
 
             // Make progress on active messages
             active_message_progress();
@@ -645,57 +743,67 @@ namespace hash_array {
     };
 }
 
-struct Comm_flow : public Dependency_flow {
+struct Channel : public Dependency_flow {
 
-    typedef std::function<void(int3 &)> Finalize_task;
+    typedef std::function<void(int3)> Finalize_task;
 
     // How to unpack after a data transfer is complete
-    Finalize_task m_finalize;
+    Finalize_task m_finalize = nullptr;
 
-    unordered_map<int3, Task *, hash_array::hash> task_map;
+    unordered_map<int3, std::atomic_int, hash_array::hash> promise_map;
     mutex mtx_graph; // Used to concurrently make changes to task_map
 
-    void set_pack(Init_task a_init) {
-        m_init = std::move(a_init);
+    Channel &dependency_count(Dependency_count f) {
+        m_dep_count = std::move(f);
+        return *this;
+    }
+
+    void define_task(Build_task f) {
+        m_build_task = std::move(f);
     }
 
     void set_finalize(Finalize_task a_finalize) {
         m_finalize = std::move(a_finalize);
     }
 
-    void finalize(int3 &idx) {
+    void finalize(int3 idx) {
+        throw_assert(m_finalize != nullptr,
+                     "set_finalize() was not called; the finalize() task cannot be called");
         m_finalize(idx);
     }
 
-    explicit Comm_flow(Thread_team *a_team) : Dependency_flow(a_team) {}
+    explicit Channel(Thread_team *a_team) : Dependency_flow(a_team) {}
 
-    // Find a task in task_map and return a pointer
-    Task *find_task(int3 &);
+    // Find a promise in promise_map and return a pointer
+    Promise *find_promise(int3 &);
 
-    // Enqueue a communication
+    // Enqueue a communication from index
     void async(int3);
 
+    // Enqueue a communication that is already initialized
     void async(int3, Task *);
 
-    // Decrement the dependency counter and spawn task if ready
-    void decrement_wait_count(int3) override;
+    // Decrement the dependency counter and enqueue communication if ready
+    void fulfill_promise(int3) override;
 };
 
-Task *Comm_flow::find_task(int3 &idx) {
-    Task *t_ = nullptr;
+Promise *Channel::find_promise(int3 &idx) {
+    Promise *t_ = nullptr;
 
     std::unique_lock<std::mutex> lck(mtx_graph);
 
-    auto tsk = task_map.find(idx);
+    auto prom_it = promise_map.find(idx);
 
-    // Task exists
-    if (tsk != task_map.end()) {
-        t_ = tsk->second;
-    } else {
-        // Task does not exist; create it
-        t_ = new Task;
-        task_map[idx] = t_; // Insert in task_map
+    if (prom_it == promise_map.end()) {
+        // Promise does not exist; create it
+        promise_map.emplace(std::piecewise_construct,
+                            std::forward_as_tuple(idx),
+                            std::forward_as_tuple(-1)); // Insert in promise_map
+        prom_it = promise_map.find(idx); // Find location
+//        prom_it->load(-1);
     }
+
+    t_ = &(prom_it->second); // Get promise
 
     lck.unlock();
 
@@ -705,42 +813,48 @@ Task *Comm_flow::find_task(int3 &idx) {
 }
 
 // Initialize task and spawn it
-void Comm_flow::async(int3 idx) {
-    auto t_ = find_task(idx);
-    m_init(idx, t_);
-    async(idx, t_);
+void Channel::async(int3 idx) {
+    throw_assert(this->m_build_task != nullptr,
+                 "define_task() was not called; the task cannot be defined");
+    Build_task f = this->m_build_task;
+    async(idx, new Task([f, idx]() { f(idx); }));
 }
 
-/* TODO: decrement_wait_count is nearly the same as Task_flow.
+/* TODO: fulfill_promise is nearly the same as Task_flow.
  * Need to make this part of the base class.
  * The only difference is find_task. */
-void Comm_flow::decrement_wait_count(int3 idx) {
-    auto t_ = find_task(idx);
+void Channel::fulfill_promise(int3 idx) {
+    auto atomic_count = find_promise(idx);
 
     // Decrement counter
-    int wait_count = std::atomic_fetch_sub(&(t_->m_wait_count), 1);
+    int wait_count = std::atomic_fetch_sub(atomic_count, 1);
 
     if (wait_count == -1) { // Uninitialized task
-        int wait_count_init = m_init(idx, t_) + 1;
-        wait_count = std::atomic_fetch_add(&(t_->m_wait_count), wait_count_init);
+        throw_assert(m_dep_count != nullptr,
+                     "dependency_count() was not called, the promise cannot be initialized");
+        int wait_count_init = m_dep_count(idx) + 1;
+        wait_count = std::atomic_fetch_add(atomic_count, wait_count_init);
         // wait_count = value before add operation
         wait_count += wait_count_init;
     }
 
     if (wait_count == 0) { // task is ready to run
-        async(idx, t_);
+        throw_assert(this->m_build_task != nullptr,
+                     "define_task() was not called; the task cannot be defined");
+        Build_task f = this->m_build_task;
+        async(idx, new Task([f, idx]() { f(idx); }));
     }
 }
 
 // Task flow context
 struct Context {
     map<string, Task_flow> m_map_task;
-    map<string, Comm_flow> m_map_comm;
+    map<string, Channel> m_map_comm;
 
     Thread_comm th_comm;
 
     Task_flow empty_task{nullptr, 0, 0, 0};
-    Comm_flow empty_comm{nullptr};
+    Channel empty_comm{nullptr};
 
 } gtfxx_context;
 
@@ -800,7 +914,7 @@ Task_flow &map_task(const string &s) {
     return gtfxx_context.empty_task;
 }
 
-Comm_flow &map_comm(const string &s) {
+Channel &map_comm(const string &s) {
     auto search = gtfxx_context.m_map_comm.find(s);
     if (search != gtfxx_context.m_map_comm.end()) {
         return search->second;
@@ -811,17 +925,21 @@ Comm_flow &map_comm(const string &s) {
 }
 
 // Spawn task
-void Comm_flow::async(int3 idx, Task *a_tsk) {
+void Channel::async(int3 idx, Task *a_tsk) {
+
+    // Increment the team task counter
     ++(team->ntasks);
 
+    // Spawn the comm task
     gtfxx_context.th_comm.spawn(a_tsk);
 
-    // Delete entry in task_map
+    // Delete entry in promise_map
     std::unique_lock<std::mutex> lck(mtx_graph);
-    assert(task_map.find(idx) != task_map.end());
-    task_map.erase(idx);
+    assert(promise_map.find(idx) != promise_map.end());
+    promise_map.erase(idx);
 }
 
+#ifdef VECTOR_ALLOCATE_LOG
 template<class T>
 struct custom_allocator {
     typedef T value_type;
@@ -852,8 +970,11 @@ constexpr bool operator!=(const custom_allocator<T> &, const custom_allocator<U>
     return false;
 }
 
-//typedef std::vector<int64_t, custom_allocator<int64_t> > Vector;
+typedef std::vector<int64_t, custom_allocator<int64_t> > Vector;
+
+#else
 typedef std::vector<int64_t> Vector;
+#endif
 
 // TODO: move previous classes inside the gtfxx namespace
 namespace gtfxx {
@@ -864,7 +985,7 @@ namespace gtfxx {
         std::tuple<T...> tuple_;
         upcxx::intrank_t dest;
 
-        comm(std::tuple<T...> a_tuple) : tuple_(std::move(a_tuple)), dest(-1) {}
+        explicit comm(std::tuple<T...> a_tuple) : tuple_(std::move(a_tuple)), dest(-1) {}
 
         comm &to_rank(upcxx::intrank_t a_dest) {
             dest = a_dest;
@@ -895,12 +1016,10 @@ namespace gtfxx {
         return {static_cast<Iter &&>(begin), static_cast<Iter &&>(end), n};
     }
 
-
     template<typename... T>
     comm<T...> send(T... a_msg) {
         return comm<T...>(std::tuple<T...>(a_msg...));
     }
-
 }
 
 int64_t ans = -1;
@@ -1134,73 +1253,74 @@ TEST(gtfxx, UPCXX) {
         return idx[0] % n_thread;
     };
 
-    map_task("map").set_task_init([=, &data](int3 &idx, Task *tsk) -> int {
-                const int i = idx[0];
-                assert(i >= 0 && i < n_thread);
-                tsk->set_function([=, &data]() {
-                    const int offset = my_rank * n_thread;
-                    const int global_comm_idx = i + offset;
-                    assert(global_comm_idx >= 0 && global_comm_idx < n_thread * n_rank);
-                    data[global_comm_idx] = 1;
-                    map_comm("send").decrement_wait_count({global_comm_idx, 0, 0});
-                });
-                return 0; // wait_count
-            })
+    map_task("map")
+            .dependency_count([](const int3 idx) { return 0; })
+            .define_task(
+                    [n_rank, n_thread, my_rank, &data](const int3 idx) {
+                        const int i = idx[0];
+                        assert(i >= 0 && i < n_thread);
+
+                        const int offset = my_rank * n_thread;
+                        const int global_comm_idx = i + offset;
+                        assert(global_comm_idx >= 0 && global_comm_idx < n_thread * n_rank);
+
+                        data[global_comm_idx] = 1;
+
+                        map_comm("send").fulfill_promise({global_comm_idx, 0, 0});
+                    })
             .compute_on(compute_on_i);
 
     // Need to be defined on the sending rank only
-    map_comm("send").set_pack([=, &data](int3 &global_comm_idx, Task *tsk) -> int {
-        const int i = global_comm_idx[0] % n_thread;
+    map_comm("send")
+            .dependency_count([](const int3 idx) { return 1; })
+            .define_task([n_rank, n_thread, my_rank, &data](const int3 global_comm_idx) {
+                assert(data[global_comm_idx[0]] == 1);
+                assert(my_rank >= 0 && my_rank < n_rank);
 
-        assert(data[global_comm_idx[0]] == 1);
+                // Comms executed by the comm thread
+                for (int i = 0; i < n_rank; ++i) {
+                    if (i != my_rank) {
+                        gtfxx::send(global_comm_idx, data[global_comm_idx[0]])
+                                .to_rank(i)
+                                .on_receive([n_rank, n_thread, &data](int3 global_comm_idx, int d) {
+                                    assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_thread * n_rank);
+                                    assert(d == 1);
+                                    assert(data[global_comm_idx[0]] == -1);
 
-        tsk->set_function([=, &data]() {
-            // Comms executed by the comm thread
-            for (int i = 0; i < n_rank; ++i) {
-                if (i != my_rank) {
-                    gtfxx::send(global_comm_idx, data[global_comm_idx[0]])
-                            .to_rank(i)
-                            .on_receive([=, &data](int3 global_comm_idx, int d) {
-                                assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_thread * n_rank);
-                                assert(d == 1);
-                                assert(data[global_comm_idx[0]] == -1);
+                                    data[global_comm_idx[0]] = d;
+                                    //map_comm("send").finalize(global_comm_idx);
+                                    map_task("reduce").fulfill_promise({0, 0, 0});
+                                });
+                    } else {
+                        map_task("reduce").fulfill_promise({0, 0, 0});
+                    }
 
-                                data[global_comm_idx[0]] = d;
-                                map_comm("send").finalize(global_comm_idx);
-                            });
                 }
-            }
-            map_task("reduce").decrement_wait_count({0, 0, 0}); // For the case when n_rank == 1
-        });
-
-        return 1; // wait_count
-    });
+            });
 
     /* Will run on the receiving rank but needs to be defined on the sending rank only.
      * All captured variables correspond to memory locations on the receiving rank.
      * Arguments correspond to the payload defined on the sending rank.
      * The payload is communicated over the network. */
-    map_comm("send").set_finalize([](int3 &global_comm_idx) {
-        map_task("reduce").decrement_wait_count({0, 0, 0});
+    map_comm("send").set_finalize([](int3 global_comm_idx) {
+        map_task("reduce").fulfill_promise({0, 0, 0});
     });
 
     int local_sum;
-
     atomic_bool done(false);
 
-    map_task("reduce").set_task_init([=, &data, &local_sum, &done](int3 &idx, Task *tsk) -> int {
+    map_task("reduce")
+            .dependency_count([n_thread, n_rank](const int3 idx) { return n_thread * n_rank; })
+            .define_task([&data, &local_sum, &done](const int3 idx) {
                 const int i = idx[0];
                 assert(i == 0);
-                tsk->set_function([i, &data, &local_sum, &done]() {
-                    assert(i == 0);
-                    done.store(true); // This is the last task that we need to run
-                    local_sum = 0;
-                    for (auto d : data) {
-                        local_sum += d;
-                        assert(d == 1);
-                    }
-                });
-                return n_thread * n_rank; // wait_count
+
+                done.store(true); // This is the last task that we need to run
+                local_sum = 0;
+                for (auto d : data) {
+                    local_sum += d;
+                    assert(d == 1);
+                }
             })
             .compute_on(compute_on_i);
 
