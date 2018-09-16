@@ -1288,8 +1288,8 @@ TEST(gtfxx, UPCXX) {
                                     assert(data[global_comm_idx[0]] == -1);
 
                                     data[global_comm_idx[0]] = d;
-                                    //map_comm("send").finalize(global_comm_idx);
-                                    map_task("reduce").fulfill_promise({0, 0, 0});
+                                    map_comm("send").finalize(global_comm_idx);
+                                    //map_task("reduce").fulfill_promise({0, 0, 0});
                                 });
                     } else {
                         map_task("reduce").fulfill_promise({0, 0, 0});
