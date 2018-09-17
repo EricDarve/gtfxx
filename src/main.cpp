@@ -3,51 +3,45 @@
 // My header files
 #include "gtfxx.h"
 
+using namespace std;
+using namespace upcxx;
+using namespace gtfxx;
+
 // TODO: make this variable non-global
 Context gtfxx_context;
 
-void Profiler::map_team_threads(Threadpool &th_pool) {
+void Profiler::map_thread_ids(Thread_pool &th_pool) {
     // IDs of th_pool threads
     for (auto &th_prio : th_pool.v_thread) {
         thread_id_map[id_to_string(th_prio.th.get_id())] = th_prio.m_id;
     }
 
-    // Adding the ID of the comm thread
-    thread_id_map[id_to_string(gtfxx_context.th_comm.th.get_id())] = -1;
+    // Adding the ID of the Active_message thread
+    thread_id_map[id_to_string(th_pool.th_comm.th.get_id())] = -1;
 
     // ID of the main() thread that is running this function
     thread_id_map[id_to_string(std::this_thread::get_id())] = -2;
 }
 
-void Threadpool::join() {
+void Thread_pool::join() {
     m_stop.store(true);
     for (auto &th : v_thread) th.join();
-    // Joining comm thread
-    gtfxx_context.th_comm.th.join();
+    // Joining Active_message thread
+    th_comm.th.join();
 }
 
-void task_emplace(string s, int n0, int n1, int n2, Threadpool *th_pool) {
+void task_emplace(string s, int n0, int n1, int n2, Thread_pool *th_pool) {
     gtfxx_context.m_map_task.emplace(std::piecewise_construct,
                                      std::forward_as_tuple(s),
                                      std::forward_as_tuple(th_pool, n0, n1, n2)
     );
 }
 
-void comm_emplace(string s, Threadpool *th_pool) {
+void comm_emplace(string s, Thread_pool *th_pool) {
     gtfxx_context.m_map_comm.emplace(std::piecewise_construct,
                                      std::forward_as_tuple(s),
                                      std::forward_as_tuple(th_pool)
     );
-}
-
-void start_comm_thread(Threadpool *th_pool) {
-    assert(th_pool != nullptr);
-    gtfxx_context.th_comm.th_pool = th_pool;
-
-    // Master thread will not be responsible for making progress on communications
-    release_master_thread();
-
-    gtfxx_context.th_comm.start();
 }
 
 Task_flow &map_task(const string &s) {
@@ -55,10 +49,8 @@ Task_flow &map_task(const string &s) {
     if (search != gtfxx_context.m_map_task.end()) {
         return search->second;
     } else {
-        assert(false);
+        throw_assert(false, "invalid argument for map_task " << s);
     }
-    // This line should not be reached
-    return gtfxx_context.empty_task;
 }
 
 Channel &map_comm(const string &s) {
@@ -66,9 +58,8 @@ Channel &map_comm(const string &s) {
     if (search != gtfxx_context.m_map_comm.end()) {
         return search->second;
     } else {
-        assert(false);
+        throw_assert(false, "invalid argument for map_comm " << s);
     }
-    return gtfxx_context.empty_comm;
 }
 
 // Spawn task
@@ -77,96 +68,13 @@ void Channel::async(int3 idx, Task *a_tsk) {
     // Increment the th_pool task counter
     ++(th_pool->n_tasks);
 
-    // Spawn the comm task
-    gtfxx_context.th_comm.spawn(a_tsk);
+    // Spawn the Active_message task
+    th_pool->th_comm.spawn(a_tsk);
 
     // Delete entry in promise_map
     std::unique_lock<std::mutex> lck(mtx_graph);
     assert(promise_map.find(idx) != promise_map.end());
     promise_map.erase(idx);
-}
-
-#ifdef VECTOR_ALLOCATE_LOG
-template<class T>
-struct custom_allocator {
-    typedef T value_type;
-
-    custom_allocator() noexcept = default;
-
-    template<class U>
-    explicit custom_allocator(const custom_allocator<U> &) noexcept {};
-
-    T *allocate(std::size_t n) {
-        printf("Allocating %ld bytes\n", n * sizeof(T));
-        return static_cast<T *>(::operator new(n * sizeof(T)));
-    }
-
-    void deallocate(T *p, std::size_t n) {
-        printf("Freeing %ld bytes\n", n * sizeof(T));
-        ::delete (p);
-    }
-};
-
-template<class T, class U>
-constexpr bool operator==(const custom_allocator<T> &, const custom_allocator<U> &) noexcept {
-    return true;
-}
-
-template<class T, class U>
-constexpr bool operator!=(const custom_allocator<T> &, const custom_allocator<U> &) noexcept {
-    return false;
-}
-
-typedef std::vector<int64_t, custom_allocator<int64_t> > Vector;
-
-#else
-typedef std::vector<int64_t> Vector;
-#endif
-
-// TODO: move previous classes inside the gtfxx namespace
-namespace gtfxx {
-
-    template<typename... T>
-    struct comm {
-
-        std::tuple<T...> tuple_;
-        upcxx::intrank_t dest;
-
-        explicit comm(std::tuple<T...> a_tuple) : tuple_(std::move(a_tuple)), dest(-1) {}
-
-        comm &to_rank(upcxx::intrank_t a_dest) {
-            dest = a_dest;
-            return *this;
-        }
-
-        template<typename Fn>
-        void on_receive(Fn &&a_tsk_) {
-            rpc_ff_tuple(a_tsk_,
-                         upcxx::make_index_sequence<std::tuple_size<std::tuple<T...> >::value>()
-            );
-        }
-
-        template<typename Fn, int... i>
-        void rpc_ff_tuple(Fn &a_tsk_, upcxx::index_sequence<i...>) {
-            upcxx::rpc_ff(dest, std::forward<Fn>(a_tsk_), std::forward<T>(std::get<i>(tuple_))...);
-        }
-    };
-
-    template<typename T, typename Iter = T *>
-    struct memblock {
-        typedef upcxx::view<T, Iter> iterator;
-    };
-
-    template<typename T, typename Iter = T *>
-    upcxx::view<T, Iter> memblock_view(std::size_t n, Iter begin) {
-        Iter end = begin + n;
-        return {static_cast<Iter &&>(begin), static_cast<Iter &&>(end), n};
-    }
-
-    template<typename... T>
-    comm<T...> send(T... a_msg) {
-        return comm<T...>(std::tuple<T...>(a_msg...));
-    }
 }
 
 int64_t ans = -1;
@@ -175,7 +83,7 @@ TEST(UPCXX, Basic) {
     // -----------------
     // Simple upc++ test
 
-    const int64_t n_rank = upcxx::rank_n();
+    const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
@@ -223,7 +131,7 @@ TEST(UPCXX, Basic) {
 
 TEST(UPCXX, ThreadCommScalar) {
     // -----------------
-    // Using a comm thread and upc++ to send a scalar
+    // Using a Active_message thread and upc++ to send a scalar
 
     const int64_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
@@ -263,7 +171,7 @@ TEST(UPCXX, ThreadCommScalar) {
 
 TEST(UPCXX, ThreadCommVector) {
     // -----------------
-    // Using a comm thread and upc++ to send a vector
+    // Using a Active_message thread and upc++ to send a vector
 
     const int64_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
@@ -322,7 +230,7 @@ TEST(UPCXX, ThreadCommVector) {
 
 TEST(UPCXX, GTFVector) {
     // -----------------
-    // Using a comm thread and gtf++ to send a vector
+    // Using a Active_message thread and gtf++ to send a vector
 
     const int64_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
@@ -388,7 +296,7 @@ TEST(gtfxx, UPCXX) {
     profiler.open("prof.out");
 
     // Create thread th_pool
-    Threadpool th_pool(n_thread);
+    Thread_pool th_pool(n_thread);
 
     task_emplace("map", n_thread, 1, 1, &th_pool);
     comm_emplace("send", &th_pool);
@@ -421,7 +329,7 @@ TEST(gtfxx, UPCXX) {
                 assert(data[global_comm_idx[0]] == 1);
                 assert(my_rank >= 0 && my_rank < n_rank);
 
-                // Comms executed by the comm thread
+                // Comms executed by the Active_message thread
                 for (int i = 0; i < n_rank; ++i) {
                     if (i != my_rank) {
                         gtfxx::send(global_comm_idx, data[global_comm_idx[0]])
@@ -473,10 +381,7 @@ TEST(gtfxx, UPCXX) {
     // Start th_pool of threads
     th_pool.start();
 
-    // TODO: we need a safer way to make sure the comm thread has been started
-    start_comm_thread(&th_pool); // Start communication thread
-
-    profiler.map_team_threads(th_pool);
+    profiler.map_thread_ids(th_pool);
 
     // Create seed tasks and start
     for (int i = 0; i < n_thread; ++i) {

@@ -7,11 +7,11 @@
 // --------------
 // Logging utility
 
-LogMessage::LogMessage(const char *file, const char *function, int line) {
+Log_message::Log_message(const char *file, const char *function, int line) {
     os << file << ":" << line << " (" << function << ") ";
 }
 
-LogMessage::~LogMessage() {
+Log_message::~Log_message() {
     os << "\n";
     std::cout << os.str();
     std::cout.flush();
@@ -20,19 +20,19 @@ LogMessage::~LogMessage() {
 // ----------------------------
 // Assert with exception throws
 
-AssertionFailureException::StreamFormatter::operator std::string() const {
+Assertion_failure_exception::StreamFormatter::operator std::string() const {
     return stream.str();
 }
 
 // Log error before throwing
-void AssertionFailureException::LogError() {
-    std::cerr << report << std::endl;
+void Assertion_failure_exception::log_error() {
+    std::cerr << m_report << std::endl;
 }
 
 // Construct an assertion failure exception
-AssertionFailureException::AssertionFailureException(const char *expression, const char *file, int line,
+Assertion_failure_exception::Assertion_failure_exception(const char *expression, const char *file, int line,
                                                      const std::string &message)
-        : expression(expression), file(file), line(line), message(message) {
+        : m_expression(expression), m_file(file), m_line(line), m_message(message) {
     std::ostringstream outputStream;
 
     if (!message.empty()) {
@@ -50,40 +50,40 @@ AssertionFailureException::AssertionFailureException(const char *expression, con
     }
 
     outputStream << " failed in file '" << file << "' line " << line;
-    report = outputStream.str();
+    m_report = outputStream.str();
 
-    LogError();
+    log_error();
 }
 
 // The assertion message
-const char *AssertionFailureException::what() const noexcept {
-    return report.c_str();
+const char *Assertion_failure_exception::what() const noexcept {
+    return m_report.c_str();
 }
 
 // The expression which was asserted to be true
-const char *AssertionFailureException::Expression() const noexcept {
-    return expression;
+const char *Assertion_failure_exception::expression() const noexcept {
+    return m_expression;
 }
 
 // Source file
-const char *AssertionFailureException::File() const noexcept {
-    return file;
+const char *Assertion_failure_exception::file() const noexcept {
+    return m_file;
 }
 
 // Source line
-int AssertionFailureException::Line() const noexcept {
-    return line;
+int Assertion_failure_exception::line() const noexcept {
+    return m_line;
 }
 
 // Description of failure
-const char *AssertionFailureException::Message() const noexcept {
-    return message.c_str();
+const char *Assertion_failure_exception::message() const noexcept {
+    return m_message.c_str();
 }
 
 // --------
 // Profiler
 
-Profiling_event::Profiling_event(string s, string t_id) :
+Profiling_event::Profiling_event(std::string s, std::string t_id) :
         name(std::move(s)), thread_id(std::move(t_id)), ev_type(uninitialized) {}
 
 void Profiling_event::timestamp() {
@@ -110,14 +110,14 @@ std::string get_thread_id() {
     return id_to_string(std::this_thread::get_id());
 }
 
-void Profiler::open(string s) {
+void Profiler::open(std::string s) {
     // Open a new file and clear up the list of events
     file_name = std::move(s);
     events.clear();
     thread_id_map.clear();
 }
 
-void Profiler::timestamp(string s) {
+void Profiler::timestamp(std::string s) {
     auto thread_id = get_thread_id();
     Profiling_event prof_ev(std::move(s), thread_id);
     prof_ev.timestamp();
@@ -127,7 +127,7 @@ void Profiler::timestamp(string s) {
     }
 }
 
-Profiling_event *Profiler::start(string s) {
+Profiling_event *Profiler::start(std::string s) {
     auto thread_id = get_thread_id();
     Profiling_event *prof_ev = new Profiling_event(std::move(s), thread_id);
     prof_ev->start();
@@ -172,7 +172,6 @@ void Profiler::dump() {
             case Profiling_event::uninitialized :
                 printf("Fatal error; we found an uninitialized profiling event");
                 exit(1);
-                break;
         }
     }
 

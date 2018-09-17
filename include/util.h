@@ -34,21 +34,19 @@
 #include <atomic>
 
 #include <upcxx/upcxx.hpp>
-using namespace upcxx;
-using namespace std;
 
 // --------------
 // Logging utility
 
 // Builds a logging message and writes it out when calling the destructor
-class LogMessage {
+class Log_message {
 public:
-    LogMessage(const char *file, const char *function, int line);
-    ~LogMessage();
+    Log_message(const char *file, const char *function, int line);
+    ~Log_message();
 
     // output operator
     template<typename T>
-    LogMessage &operator<<(const T &t) {
+    Log_message &operator<<(const T &t) {
         os << t;
         return *this;
     }
@@ -60,7 +58,7 @@ private:
 #ifdef LOGGER_OUTPUT_ON
 
 #define LOG(out) do { \
-LogMessage(__FILE__,__func__,__LINE__) << out; \
+Log_message(__FILE__,__func__,__LINE__) << out; \
 } while (0)
 
 #else
@@ -70,13 +68,13 @@ LogMessage(__FILE__,__func__,__LINE__) << out; \
 // ----------------------------
 // Assert with exception throws
 
-class AssertionFailureException : public std::exception {
+class Assertion_failure_exception : public std::exception {
 private:
-    const char *expression;
-    const char *file;
-    int line;
-    std::string message;
-    std::string report;
+    const char *m_expression;
+    const char *m_file;
+    int m_line;
+    std::string m_message;
+    std::string m_report;
 
 public:
     // Helper class for formatting assertion message
@@ -95,37 +93,79 @@ public:
     };
 
     // Construct an assertion failure exception
-    AssertionFailureException(const char *expression, const char *file, int line, const std::string &message);
+    Assertion_failure_exception(const char *expression, const char *file, int line, const std::string &message);
 
-    ~AssertionFailureException() noexcept override = default;
+    ~Assertion_failure_exception() noexcept override = default;
 
     // Log error before throwing
-    void LogError();
+    void log_error();
 
     // The assertion message
     const char *what() const noexcept override;
 
     // The expression which was asserted to be true
-    const char *Expression() const noexcept;
+    const char *expression() const noexcept;
 
     // Source file
-    const char *File() const noexcept;
+    const char *file() const noexcept;
 
     // Source line
-    int Line() const noexcept;
+    int line() const noexcept;
 
     // Description of failure
-    const char *Message() const noexcept;
+    const char *message() const noexcept;
 };
 
-// Assert that EXPRESSION evaluates to true, otherwise raise AssertionFailureException
+// Assert that EXPRESSION evaluates to true, otherwise raise Assertion_failure_exception
 // with associated MESSAGE (which may use C++ stream-style message formatting).
-#define throw_assert(EXPRESSION, MESSAGE) if(!(EXPRESSION)) { throw AssertionFailureException(#EXPRESSION, __FILE__, __LINE__, (AssertionFailureException::StreamFormatter() << MESSAGE)); }
+#define throw_assert(EXPRESSION, MESSAGE) if(!(EXPRESSION)) { throw Assertion_failure_exception(#EXPRESSION, __FILE__, __LINE__, (Assertion_failure_exception::StreamFormatter() << MESSAGE)); }
+
+// ---------------------------------------------
+// Vector class with different memory allocators
+
+#ifdef VECTOR_ALLOCATE_LOG
+template<class T>
+struct custom_allocator {
+    typedef T value_type;
+
+    custom_allocator() noexcept = default;
+
+    template<class U>
+    explicit custom_allocator(const custom_allocator<U> &) noexcept {};
+
+    T *allocate(std::size_t n) {
+        printf("Allocating %ld bytes\n", n * sizeof(T));
+        return static_cast<T *>(::operator new(n * sizeof(T)));
+    }
+
+    void deallocate(T *p, std::size_t n) {
+        printf("Freeing %ld bytes\n", n * sizeof(T));
+        ::delete (p);
+    }
+};
+
+template<class T, class U>
+constexpr bool operator==(const custom_allocator<T> &, const custom_allocator<U> &) noexcept {
+    return true;
+}
+
+template<class T, class U>
+constexpr bool operator!=(const custom_allocator<T> &, const custom_allocator<U> &) noexcept {
+    return false;
+}
+
+typedef std::vector<int64_t, custom_allocator<int64_t> > Vector;
+
+#else
+typedef std::vector<int64_t> Vector;
+#endif
 
 // --------
 // Profiler
 
-struct Threadpool;
+namespace gtfxx {
+    struct Thread_pool;
+}
 
 struct Profiling_event {
     enum event {
@@ -137,7 +177,7 @@ struct Profiling_event {
     std::chrono::high_resolution_clock::time_point m_start, m_stop;
     event ev_type;
 
-    Profiling_event(string s, string t_id);
+    Profiling_event(std::string s, std::string t_id);
 
     void timestamp();
 
@@ -152,18 +192,18 @@ std::string get_thread_id();
 
 struct Profiler {
     std::string file_name{"prof.out"};
-    list<Profiling_event> events;
+    std::list<Profiling_event> events;
     std::map<std::string, int> thread_id_map;
 
     std::mutex mtx;
 
-    void map_team_threads(Threadpool &);
+    void map_thread_ids(gtfxx::Thread_pool &);
 
-    void open(string s);
+    void open(std::string s);
 
-    void timestamp(string s);
+    void timestamp(std::string s);
 
-    Profiling_event *start(string s);
+    Profiling_event *start(std::string s);
 
     void stop(Profiling_event *prof_ev);
 

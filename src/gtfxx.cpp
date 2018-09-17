@@ -4,20 +4,22 @@
 
 #include "gtfxx.h"
 
+using namespace gtfxx;
+
 // ---------------------
 // UPC++ function calls
 
-void active_message_progress() {
+void gtfxx::active_message_progress() {
     upcxx::progress();
 }
 
-void capture_master_thread() {
+void gtfxx::capture_master_thread() {
     if (upcxx::backend::initial_master_scope == nullptr) {
-        upcxx::backend::initial_master_scope = new persona_scope{backend::master};
+        upcxx::backend::initial_master_scope = new upcxx::persona_scope{upcxx::backend::master};
     }
 }
 
-void release_master_thread() {
+void gtfxx::release_master_thread() {
     if (upcxx::backend::initial_master_scope != nullptr) {
         upcxx::liberate_master_persona();
     }
@@ -47,7 +49,7 @@ void spin_task(Thread_prio *);
 
 void Thread_prio::start() {
     m_empty.store(true);
-    th = thread(spin_task, this); // Execute tasks in queue
+    th = std::thread(spin_task, this); // Execute tasks in queue
 }
 
 void Thread_prio::spawn(Task *a_t) {
@@ -140,7 +142,7 @@ void spin_comm(Thread_comm *);
 
 void Thread_comm::start() {
     m_empty.store(true);
-    th = thread(spin_comm, this);
+    th = std::thread(spin_comm, this);
 }
 
 void Thread_comm::spawn(Task *a_t) {
@@ -184,7 +186,7 @@ void spin_comm(Thread_comm *a_thread) {
             delete tsk;
 
             // Make progress on active messages
-            active_message_progress();
+            gtfxx::active_message_progress();
 
             lck.lock();
         }
@@ -201,7 +203,7 @@ void spin_comm(Thread_comm *a_thread) {
             std::this_thread::sleep_for(std::chrono::microseconds(40));
 
             // Make progress on active messages
-            active_message_progress();
+            gtfxx::active_message_progress();
         }
 
         lck.lock();
@@ -209,23 +211,29 @@ void spin_comm(Thread_comm *a_thread) {
 }
 
 // ---------------------
-// Threadpool functions
+// Thread_pool functions
 
-Threadpool::Threadpool(const int n_thread) :
+Thread_pool::Thread_pool(const int n_thread) :
         v_thread(n_thread), n_tasks(0), m_stop(false) {
     for (int i = 0; i < n_thread; ++i) {
         v_thread[i].th_pool = this;
         v_thread[i].m_id = static_cast<unsigned short>(i);
     }
+    th_comm.th_pool = this;
 }
 
-void Threadpool::start() {
+void Thread_pool::start() {
     n_tasks.store(0);
     m_stop.store(false);
     for (auto &th : v_thread) th.start();
+
+    // Starting comm thread
+    // Master thread will not be responsible for making progress on communications
+    release_master_thread();
+    th_comm.start();
 }
 
-void Threadpool::spawn(const int a_id, Task *a_task) {
+void Thread_pool::spawn(const int a_id, Task *a_task) {
     assert(a_id >= 0 && static_cast<unsigned long>(a_id) < v_thread.size());
 
     ++n_tasks;
@@ -236,7 +244,7 @@ void Threadpool::spawn(const int a_id, Task *a_task) {
     if (!v_thread[a_id].m_empty.load()) {
         // Thread is already busy
         // Are there other threads that are idle?
-        const unsigned long n_query = min(1 + n_query_spawn, v_thread.size());
+        const unsigned long n_query = std::min(1 + n_query_spawn, v_thread.size());
         for (unsigned long i = a_id + 1; i < a_id + n_query; ++i) {
             auto j = i % v_thread.size();
             if (v_thread[j].m_empty.load()) {
@@ -254,14 +262,14 @@ void Threadpool::spawn(const int a_id, Task *a_task) {
         } else {
             sprintf(timestamp_message, "spawn_other [%d->]%d", a_id, id_);
         }
-        profiler.timestamp(string(timestamp_message));
+        profiler.timestamp(std::string(timestamp_message));
     }
 
     v_thread[id_].spawn(a_task);
 }
 
-void Threadpool::steal(unsigned short a_id) {
-    const unsigned long n_query = min(n_query_steal, v_thread.size());
+void Thread_pool::steal(unsigned short a_id) {
+    const unsigned long n_query = std::min(n_query_steal, v_thread.size());
     for (unsigned long i = a_id + 1; i < a_id + n_query; ++i) {
         auto j = i % v_thread.size();
         Thread_prio &thread_j = v_thread[j];
@@ -288,7 +296,7 @@ void Threadpool::steal(unsigned short a_id) {
 
 Dependency_flow::Dependency_flow() : th_pool(nullptr), m_dep_count(nullptr), m_build_task(nullptr) {}
 
-Dependency_flow::Dependency_flow(Threadpool *a_pool) :
+Dependency_flow::Dependency_flow(Thread_pool *a_pool) :
         th_pool(a_pool), m_dep_count(nullptr), m_build_task(nullptr) {}
 
 // ------------
@@ -317,7 +325,7 @@ std::atomic_int &Matrix3_promise::operator()(int i, int j, int k) {
 
 Task_flow::Task_flow() : m_map(nullptr) {}
 
-Task_flow::Task_flow(Threadpool *a_pool, int n0, int n1, int n2) :
+Task_flow::Task_flow(Thread_pool *a_pool, int n0, int n1, int n2) :
         Dependency_flow(a_pool), promise_grid(n0, n1, n2), m_map(nullptr) {}
 
 Task_flow &Task_flow::dependency_count(Dependency_count f) {
@@ -384,7 +392,8 @@ void Task_flow::fulfill_promise(int3 idx) {
 // Channel class
 
 Channel::Channel() : m_finalize(nullptr) {}
-Channel::Channel(Threadpool *a_pool) : Dependency_flow(a_pool), m_finalize(nullptr) {}
+
+Channel::Channel(Thread_pool *a_pool) : Dependency_flow(a_pool), m_finalize(nullptr) {}
 
 Channel &Channel::dependency_count(Dependency_count f) {
     m_dep_count = std::move(f);
@@ -462,8 +471,3 @@ void Channel::fulfill_promise(int3 idx) {
         async(idx, new Task([f, idx]() { f(idx); }));
     }
 }
-
-// -----------------
-// Task flow context
-
-Context::Context() : empty_task{nullptr, 0, 0, 0}, empty_comm{nullptr} {}
