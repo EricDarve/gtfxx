@@ -299,6 +299,37 @@ Dependency_flow::Dependency_flow() : th_pool(nullptr), m_dep_count(nullptr), m_b
 Dependency_flow::Dependency_flow(Thread_pool *a_pool) :
         th_pool(a_pool), m_dep_count(nullptr), m_build_task(nullptr) {}
 
+// Enqueue task immediately
+void Dependency_flow::async(int3 idx) {
+    throw_assert(this->m_build_task != nullptr,
+                 "define_task() was not called; the task cannot be defined");
+    async_task_spawn(idx, new Task([this, idx]() {
+        this->m_build_task(idx);
+    }));
+}
+
+void Dependency_flow::do_fulfill_promise(int3 idx, Promise *atomic_count) {
+    // Decrement counter
+    int wait_count = std::atomic_fetch_sub(atomic_count, 1);
+
+    if (wait_count == -1) { // Uninitialized task
+        throw_assert(m_dep_count != nullptr,
+                     "dependency_count() was not called; the promise cannot be initialized");
+        int wait_count_init = m_dep_count(idx);
+        wait_count = std::atomic_fetch_add(atomic_count, wait_count_init);
+        // wait_count = value before add operation
+        wait_count += wait_count_init + 1;
+    }
+
+    if (wait_count == 0) { // task is ready to run
+        throw_assert(this->m_build_task != nullptr,
+                     "define_task() was not called; the task cannot be defined");
+        async_task_spawn(idx, new Task([this, idx]() {
+            this->m_build_task(idx);
+        }));
+    }
+}
+
 // ------------
 // Promise grid
 
@@ -343,7 +374,7 @@ void Task_flow::compute_on(Map_task a_map) {
 }
 
 // Spawn task
-void Task_flow::async(int3 idx, Task *a_tsk) {
+void Task_flow::async_task_spawn(int3 idx, Task *a_tsk) {
     // Basic sanity check
     assert(a_tsk != nullptr);
     assert(th_pool != nullptr);
@@ -353,39 +384,12 @@ void Task_flow::async(int3 idx, Task *a_tsk) {
     th_pool->spawn(/*task map*/ m_map(idx), a_tsk);
 }
 
-// Enqueue task immediately
-void Task_flow::async(int3 idx) {
-    throw_assert(this->m_build_task != nullptr,
-                 "define_task() was not called; the task cannot be defined");
-    Build_task f = this->m_build_task;
-    async(idx, new Task([f, idx]() { f(idx); }));
-}
-
 void Task_flow::fulfill_promise(int3 idx) {
     assert(0 <= idx[0] && idx[0] < promise_grid.n0);
     assert(0 <= idx[1] && idx[1] < promise_grid.n1);
     assert(0 <= idx[2] && idx[2] < promise_grid.n2);
 
-    auto atomic_count = &(promise_grid(idx[0], idx[1], idx[2]));
-
-    // Decrement counter
-    int wait_count = std::atomic_fetch_sub(atomic_count, 1);
-
-    if (wait_count == -1) { // Uninitialized task
-        throw_assert(m_dep_count != nullptr,
-                     "dependency_count() was not called; the promise cannot be initialized");
-        int wait_count_init = m_dep_count(idx);
-        wait_count = std::atomic_fetch_add(atomic_count, wait_count_init);
-        // wait_count = value before add operation
-        wait_count += wait_count_init + 1;
-    }
-
-    if (wait_count == 0) { // task is ready to run
-        throw_assert(this->m_build_task != nullptr,
-                     "define_task() was not called; the task cannot be defined");
-        Build_task f = this->m_build_task;
-        async(idx, new Task([f, idx]() { f(idx); }));
-    }
+    do_fulfill_promise(idx, &(promise_grid(idx[0], idx[1], idx[2])));
 }
 
 // -------------
@@ -438,36 +442,21 @@ Promise *Channel::find_promise(int3 &idx) {
     return t_;
 }
 
-// Initialize task and spawn it
-void Channel::async(int3 idx) {
-    throw_assert(this->m_build_task != nullptr,
-                 "define_task() was not called; the task cannot be defined");
-    Build_task f = this->m_build_task;
-    async(idx, new Task([f, idx]() { f(idx); }));
+// Spawn task
+void Channel::async_task_spawn(int3 idx, Task *a_tsk) {
+
+    // Increment the thread pool task counter
+    ++(th_pool->n_tasks);
+
+    // Spawn the active message task
+    th_pool->th_comm.spawn(a_tsk);
+
+    // Delete entry in promise_map
+    std::unique_lock<std::mutex> lck(mtx_graph);
+    assert(promise_map.find(idx) != promise_map.end());
+    promise_map.erase(idx);
 }
 
-/* TODO: fulfill_promise is nearly the same as Task_flow.
- * Need to make this part of the base class.
- * The only difference is find_task. */
 void Channel::fulfill_promise(int3 idx) {
-    auto atomic_count = find_promise(idx);
-
-    // Decrement counter
-    int wait_count = std::atomic_fetch_sub(atomic_count, 1);
-
-    if (wait_count == -1) { // Uninitialized task
-        throw_assert(m_dep_count != nullptr,
-                     "dependency_count() was not called, the promise cannot be initialized");
-        int wait_count_init = m_dep_count(idx) + 1;
-        wait_count = std::atomic_fetch_add(atomic_count, wait_count_init);
-        // wait_count = value before add operation
-        wait_count += wait_count_init;
-    }
-
-    if (wait_count == 0) { // task is ready to run
-        throw_assert(this->m_build_task != nullptr,
-                     "define_task() was not called; the task cannot be defined");
-        Build_task f = this->m_build_task;
-        async(idx, new Task([f, idx]() { f(idx); }));
-    }
+    do_fulfill_promise(idx, find_promise(idx));
 }

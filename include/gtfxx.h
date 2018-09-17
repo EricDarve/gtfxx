@@ -119,6 +119,7 @@ namespace gtfxx {
 // Base class for task flow
 
     typedef std::array<int, 3> int3;
+    typedef std::atomic_int Promise;
 
     struct Dependency_flow {
         typedef std::function<int(const int3)> Dependency_count;
@@ -134,19 +135,21 @@ namespace gtfxx {
         Build_task m_build_task;
 
         Dependency_flow();
-
-        explicit Dependency_flow(Thread_pool *a_pool);
+        explicit Dependency_flow(Thread_pool *);
 
         virtual ~Dependency_flow() = default;
 
+        // Enqueue tasks
+        void async(int3);
+        virtual void async_task_spawn(int3 idx, Task *a_tsk) = 0;
+
         // Decrement the dependency counter and spawn task if ready
         virtual void fulfill_promise(int3) = 0;
+        void do_fulfill_promise(int3, Promise*);
     };
 
 // ------------
 // Promise grid
-
-    typedef std::atomic_int Promise;
 
     struct Matrix3_promise : std::vector<Promise> {
         int n0, n1, n2;
@@ -185,14 +188,12 @@ namespace gtfxx {
         // Which thread should execute the task
         void compute_on(Map_task a_map);
 
-        // Spawn a task from index
-        void async(int3);
-
-        // Spawn a task that is already initialized
-        void async(int3, Task *);
-
         // Decrement the dependency counter and spawn task if ready
         void fulfill_promise(int3) override;
+
+    private:
+        // Spawn a task that is already initialized
+        void async_task_spawn(int3, Task *) override;
     };
 
 // -----------------
@@ -250,14 +251,12 @@ namespace gtfxx {
         // Find a promise in promise_map and return a pointer
         Promise *find_promise(int3 &);
 
-        // Enqueue a communication from index
-        void async(int3);
-
-        // Enqueue a communication that is already initialized
-        void async(int3, Task *);
-
         // Decrement the dependency counter and enqueue communication if ready
         void fulfill_promise(int3) override;
+
+    private:
+        // Enqueue a communication that is already initialized
+        void async_task_spawn(int3, Task *) override;
     };
 
 // ----------------

@@ -62,21 +62,6 @@ Channel &map_comm(const string &s) {
     }
 }
 
-// Spawn task
-void Channel::async(int3 idx, Task *a_tsk) {
-
-    // Increment the th_pool task counter
-    ++(th_pool->n_tasks);
-
-    // Spawn the Active_message task
-    th_pool->th_comm.spawn(a_tsk);
-
-    // Delete entry in promise_map
-    std::unique_lock<std::mutex> lck(mtx_graph);
-    assert(promise_map.find(idx) != promise_map.end());
-    promise_map.erase(idx);
-}
-
 int64_t ans = -1;
 
 TEST(UPCXX, Basic) {
