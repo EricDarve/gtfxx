@@ -103,7 +103,7 @@ public:
     void LogError();
 
     // The assertion message
-    virtual const char *what() const noexcept override;
+    const char *what() const noexcept override;
 
     // The expression which was asserted to be true
     const char *Expression() const noexcept;

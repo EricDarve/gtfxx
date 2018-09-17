@@ -3,6 +3,7 @@
 // My header files
 #include "gtfxx.h"
 
+// TODO: make this variable non-global
 Context gtfxx_context;
 
 void Profiler::map_team_threads(Threadpool &th_pool) {
