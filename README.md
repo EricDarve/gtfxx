@@ -35,6 +35,8 @@ This will create an executable in the `bin/` directory. The source files are in 
 
 `build/` contains compiled object files and cmake files.
 
+## How to run a GTF++ code
+
 To run the code, use the following command:
 <pre>
 /path/to/upcxxinstall/upcxx/bin/upcxx-run -n 16 ./gtfxx --gtest_filter=* --gtest_break_on_failure --gtest_repeat=1
