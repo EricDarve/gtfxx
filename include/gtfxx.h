@@ -39,7 +39,7 @@ namespace gtfxx {
 // Thread with priority queue
     struct Thread_prio {
         Thread_pool *th_pool;
-        unsigned short m_id; // thread id in a thread pool
+        int m_id; // thread id in a thread pool
 
         std::priority_queue<Task *, std::vector<Task *>, Task_comparison> ready_queue;
         std::mutex mtx; // Used to manage access to the priority queue
@@ -135,17 +135,20 @@ namespace gtfxx {
         Build_task m_build_task;
 
         Dependency_flow();
+
         explicit Dependency_flow(Thread_pool *);
 
         virtual ~Dependency_flow() = default;
 
         // Enqueue tasks
-        void async(int3);
+        void seed_task(int3);
+
         virtual void async_task_spawn(int3 idx, Task *a_tsk) = 0;
 
         // Decrement the dependency counter and spawn task if ready
         virtual void fulfill_promise(int3) = 0;
-        void do_fulfill_promise(int3, Promise*);
+
+        void do_fulfill_promise(int3, Promise *);
     };
 
 // ------------
@@ -180,13 +183,13 @@ namespace gtfxx {
         Task_flow(Thread_pool *a_pool, int n0, int n1, int n2);
 
         // Defines the number of dependencies
-        Task_flow &dependency_count(Dependency_count f);
+        Task_flow &wait_on_promises(Dependency_count f);
 
         // Defines the task to be run asynchronously
-        Task_flow &define_task(Build_task f);
+        Task_flow &then_run(Build_task f);
 
         // Which thread should execute the task
-        void compute_on(Map_task a_map);
+        void on_thread(Map_task a_map);
 
         // Decrement the dependency counter and spawn task if ready
         void fulfill_promise(int3) override;
@@ -235,10 +238,10 @@ namespace gtfxx {
         explicit Channel(Thread_pool *a_pool);
 
         // Defines the number of dependencies
-        Channel &dependency_count(Dependency_count f);
+        Channel &wait_on_promises(Dependency_count f);
 
         // Defines the communication channel to run
-        void define_task(Build_task f);
+        void then_send(Build_task f);
 
         // Defines the callback function.
         // The callback function may be called after communication completes.
@@ -278,7 +281,7 @@ namespace gtfxx {
         }
 
         template<typename Fn>
-        void on_receive(Fn &&a_tsk_) {
+        void then_on_receiving_rank(Fn &&a_tsk_) {
             rpc_ff_tuple(a_tsk_,
                          upcxx::make_index_sequence<std::tuple_size<std::tuple<T...> >::value>()
             );
@@ -307,13 +310,5 @@ namespace gtfxx {
         return Active_message<T...>(std::tuple<T...>(a_msg...));
     }
 }
-
-// -----------------
-// Task flow context
-
-struct Context {
-    std::map<std::string, gtfxx::Task_flow> m_map_task;
-    std::map<std::string, gtfxx::Channel> m_map_comm;
-};
 
 #endif //GTFXX_GTFXX_H

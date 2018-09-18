@@ -3,6 +3,7 @@
 //
 
 #include "util.h"
+#include "gtfxx.h"
 
 // --------------
 // Logging utility
@@ -108,6 +109,19 @@ std::string id_to_string(std::thread::id id) {
 
 std::string get_thread_id() {
     return id_to_string(std::this_thread::get_id());
+}
+
+void Profiler::record_thread_ids(gtfxx::Thread_pool &th_pool) {
+    // IDs of th_pool threads
+    for (auto &th_prio : th_pool.v_thread) {
+        thread_id_map[id_to_string(th_prio.th.get_id())] = th_prio.m_id;
+    }
+
+    // Adding the ID of the Active_message thread
+    thread_id_map[id_to_string(th_pool.th_comm.th.get_id())] = -1;
+
+    // ID of the main() thread that is running this function
+    thread_id_map[id_to_string(std::this_thread::get_id())] = -2;
 }
 
 void Profiler::open(std::string s) {

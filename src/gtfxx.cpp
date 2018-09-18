@@ -233,6 +233,13 @@ void Thread_pool::start() {
     th_comm.start();
 }
 
+void Thread_pool::join() {
+    m_stop.store(true);
+    for (auto &th : v_thread) th.join();
+    // Joining Active_message thread
+    th_comm.th.join();
+}
+
 void Thread_pool::spawn(const int a_id, Task *a_task) {
     assert(a_id >= 0 && static_cast<unsigned long>(a_id) < v_thread.size());
 
@@ -300,7 +307,7 @@ Dependency_flow::Dependency_flow(Thread_pool *a_pool) :
         th_pool(a_pool), m_dep_count(nullptr), m_build_task(nullptr) {}
 
 // Enqueue task immediately
-void Dependency_flow::async(int3 idx) {
+void Dependency_flow::seed_task(int3 idx) {
     throw_assert(this->m_build_task != nullptr,
                  "define_task() was not called; the task cannot be defined");
     async_task_spawn(idx, new Task([this, idx]() {
@@ -337,7 +344,7 @@ Matrix3_promise::Matrix3_promise() : n0(0), n1(0), n2(0) {}
 
 // Initialize with -1
 Matrix3_promise::Matrix3_promise(int a_n0, int a_n1, int a_n2) :
-        vector<Promise>(a_n0 * a_n1 * a_n2),
+        std::vector<Promise>(a_n0 * a_n1 * a_n2),
         n0(a_n0), n1(a_n1), n2(a_n2) {
     for (int i = 0; i < n0 * n1 * n2; ++i) {
         operator[](i).store(-1);
@@ -359,17 +366,17 @@ Task_flow::Task_flow() : m_map(nullptr) {}
 Task_flow::Task_flow(Thread_pool *a_pool, int n0, int n1, int n2) :
         Dependency_flow(a_pool), promise_grid(n0, n1, n2), m_map(nullptr) {}
 
-Task_flow &Task_flow::dependency_count(Dependency_count f) {
+Task_flow &Task_flow::wait_on_promises(Dependency_count f) {
     m_dep_count = std::move(f);
     return *this;
 }
 
-Task_flow &Task_flow::define_task(Build_task f) {
+Task_flow &Task_flow::then_run(Build_task f) {
     m_build_task = std::move(f);
     return *this;
 }
 
-void Task_flow::compute_on(Map_task a_map) {
+void Task_flow::on_thread(Map_task a_map) {
     m_map = std::move(a_map);
 }
 
@@ -389,7 +396,7 @@ void Task_flow::fulfill_promise(int3 idx) {
     assert(0 <= idx[1] && idx[1] < promise_grid.n1);
     assert(0 <= idx[2] && idx[2] < promise_grid.n2);
 
-    do_fulfill_promise(idx, &(promise_grid(idx[0], idx[1], idx[2])));
+    do_fulfill_promise(idx, &promise_grid(idx[0], idx[1], idx[2]));
 }
 
 // -------------
@@ -399,12 +406,12 @@ Channel::Channel() : m_finalize(nullptr) {}
 
 Channel::Channel(Thread_pool *a_pool) : Dependency_flow(a_pool), m_finalize(nullptr) {}
 
-Channel &Channel::dependency_count(Dependency_count f) {
+Channel &Channel::wait_on_promises(Dependency_count f) {
     m_dep_count = std::move(f);
     return *this;
 }
 
-void Channel::define_task(Build_task f) {
+void Channel::then_send(Build_task f) {
     m_build_task = std::move(f);
 }
 

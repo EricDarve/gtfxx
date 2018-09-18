@@ -197,7 +197,7 @@ struct Profiler {
 
     std::mutex mtx;
 
-    void map_thread_ids(gtfxx::Thread_pool &);
+    void record_thread_ids(gtfxx::Thread_pool &);
 
     void open(std::string s);
 

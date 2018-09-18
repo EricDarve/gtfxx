@@ -7,61 +7,6 @@ using namespace std;
 using namespace upcxx;
 using namespace gtfxx;
 
-// TODO: make this variable non-global
-Context gtfxx_context;
-
-void Profiler::map_thread_ids(Thread_pool &th_pool) {
-    // IDs of th_pool threads
-    for (auto &th_prio : th_pool.v_thread) {
-        thread_id_map[id_to_string(th_prio.th.get_id())] = th_prio.m_id;
-    }
-
-    // Adding the ID of the Active_message thread
-    thread_id_map[id_to_string(th_pool.th_comm.th.get_id())] = -1;
-
-    // ID of the main() thread that is running this function
-    thread_id_map[id_to_string(std::this_thread::get_id())] = -2;
-}
-
-void Thread_pool::join() {
-    m_stop.store(true);
-    for (auto &th : v_thread) th.join();
-    // Joining Active_message thread
-    th_comm.th.join();
-}
-
-void task_emplace(string s, int n0, int n1, int n2, Thread_pool *th_pool) {
-    gtfxx_context.m_map_task.emplace(std::piecewise_construct,
-                                     std::forward_as_tuple(s),
-                                     std::forward_as_tuple(th_pool, n0, n1, n2)
-    );
-}
-
-void comm_emplace(string s, Thread_pool *th_pool) {
-    gtfxx_context.m_map_comm.emplace(std::piecewise_construct,
-                                     std::forward_as_tuple(s),
-                                     std::forward_as_tuple(th_pool)
-    );
-}
-
-Task_flow &map_task(const string &s) {
-    auto search = gtfxx_context.m_map_task.find(s);
-    if (search != gtfxx_context.m_map_task.end()) {
-        return search->second;
-    } else {
-        throw_assert(false, "invalid argument for map_task " << s);
-    }
-}
-
-Channel &map_comm(const string &s) {
-    auto search = gtfxx_context.m_map_comm.find(s);
-    if (search != gtfxx_context.m_map_comm.end()) {
-        return search->second;
-    } else {
-        throw_assert(false, "invalid argument for map_comm " << s);
-    }
-}
-
 int64_t ans = -1;
 
 TEST(UPCXX, Basic) {
@@ -91,7 +36,7 @@ TEST(UPCXX, Basic) {
 
     gtfxx::send(gtfxx::memblock_view<int64_t>(msg.size(), &msg[0]), dummy)
             .to_rank(dest)
-            .on_receive([](
+            .then_on_receiving_rank([](
                     gtfxx::memblock<int64_t>::iterator msg_, int64_t dummy) {
                 assert(dummy == upcxx::rank_n() - upcxx::rank_me());
                 int64_t sum = 0;
@@ -118,7 +63,7 @@ TEST(UPCXX, ThreadCommScalar) {
     // -----------------
     // Using a Active_message thread and upc++ to send a scalar
 
-    const int64_t n_rank = upcxx::rank_n();
+    const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
@@ -158,7 +103,7 @@ TEST(UPCXX, ThreadCommVector) {
     // -----------------
     // Using a Active_message thread and upc++ to send a vector
 
-    const int64_t n_rank = upcxx::rank_n();
+    const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
@@ -217,7 +162,7 @@ TEST(UPCXX, GTFVector) {
     // -----------------
     // Using a Active_message thread and gtf++ to send a vector
 
-    const int64_t n_rank = upcxx::rank_n();
+    const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
@@ -235,7 +180,7 @@ TEST(UPCXX, GTFVector) {
 
     expected += dest + dest;
 
-    int local_ans = -1;
+    int64_t local_ans = -1;
 
     auto task_thread_comm = [=, &local_ans]() {
         // Acquiring master persona
@@ -243,7 +188,7 @@ TEST(UPCXX, GTFVector) {
 
         gtfxx::send(gtfxx::memblock_view<int64_t>(msg.size(), &msg[0]), my_rank_send)
                 .to_rank(dest)
-                .on_receive([=, &local_ans](gtfxx::memblock<int64_t>::iterator msg_, int64_t my_rank_send) {
+                .then_on_receiving_rank([=, &local_ans](gtfxx::memblock<int64_t>::iterator msg_, int64_t my_rank_send) {
                     assert(my_rank_send == upcxx::rank_n() - 1 - upcxx::rank_me());
                     int sum = 0;
                     for (auto it : msg_) {
@@ -269,9 +214,50 @@ TEST(UPCXX, GTFVector) {
     upcxx::barrier();
 }
 
+// -----------------
+// Task flow context
+
+struct Context {
+    std::map<std::string, gtfxx::Task_flow> m_map_task;
+    std::map<std::string, gtfxx::Channel> m_map_comm;
+
+    void task_emplace(const std::string s, int n0, int n1, int n2, gtfxx::Thread_pool *th_pool) {
+        m_map_task.emplace(std::piecewise_construct,
+                           std::forward_as_tuple(s),
+                           std::forward_as_tuple(th_pool, n0, n1, n2)
+        );
+    }
+
+    void comm_emplace(const std::string s, gtfxx::Thread_pool *th_pool) {
+        m_map_comm.emplace(std::piecewise_construct,
+                           std::forward_as_tuple(s),
+                           std::forward_as_tuple(th_pool)
+        );
+    }
+
+    gtfxx::Task_flow &map_task(const std::string s) {
+        auto search = m_map_task.find(s);
+        if (search != m_map_task.end()) {
+            return search->second;
+        } else {
+            throw_assert(false, "invalid argument for map_task " << s);
+        }
+    };
+
+    gtfxx::Channel &map_comm(const std::string s) {
+        auto search = m_map_comm.find(s);
+        if (search != m_map_comm.end()) {
+            return search->second;
+        } else {
+            throw_assert(false, "invalid argument for map_comm " << s);
+        }
+    };
+};
+
 TEST(gtfxx, UPCXX) {
 
-    const int64_t n_rank = upcxx::rank_n();
+    // TODO: replace by gtfxx implementations
+    const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
     const int n_thread = 4; // number of threads to use
 
@@ -280,12 +266,24 @@ TEST(gtfxx, UPCXX) {
 
     profiler.open("prof.out");
 
-    // Create thread th_pool
+    // GTF++ context; thread pool
+    Context ctx;
+
     Thread_pool th_pool(n_thread);
 
-    task_emplace("map", n_thread, 1, 1, &th_pool);
-    comm_emplace("send", &th_pool);
-    task_emplace("reduce", 1, 1, 1, &th_pool);
+    // Useful shortcut lambda functions
+    auto ctx_task = [&ctx](const string s) -> Task_flow & {
+        return ctx.map_task(s);
+    };
+
+    auto ctx_comm = [&ctx](const string s) -> Channel & {
+        return ctx.map_comm(s);
+    };
+
+    // Setting up task flow grids that are needed later
+    ctx.task_emplace("map", n_thread, 1, 1, &th_pool);
+    ctx.comm_emplace("send", &th_pool);
+    ctx.task_emplace("reduce", 1, 1, 1, &th_pool);
 
     vector<int> data(n_thread * n_rank, -1);
 
@@ -293,64 +291,67 @@ TEST(gtfxx, UPCXX) {
         return idx[0] % n_thread;
     };
 
-    map_task("map")
-            .dependency_count([](const int3 idx) { return 0; })
-            .define_task(
-                    [n_rank, n_thread, my_rank, &data](const int3 idx) {
+    // Define TF "map"
+    ctx_task("map")
+            .wait_on_promises([](const int3 idx) { return 0; })
+            .then_run(
+                    [=, &data](const int3 idx) {
                         assert(idx[0] >= 0 && idx[0] < n_thread);
                         assert(my_rank >= 0 && my_rank < n_rank);
 
                         const int global_comm_idx = idx[0] + my_rank * n_thread;
                         data[global_comm_idx] = 1;
-                        map_comm("send").fulfill_promise({global_comm_idx, 0, 0});
-                    })
-            .compute_on(compute_on_i);
 
+                        ctx_comm("send").fulfill_promise({global_comm_idx, 0, 0});
+                    })
+            .on_thread(compute_on_i);
+
+    // Define comm TF "send"
     // Needs to be defined on the sending rank only
-    map_comm("send")
-            .dependency_count([](const int3 idx) { return 1; })
-            .define_task([n_rank, n_thread, my_rank, &data](const int3 global_comm_idx) {
-                assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_rank*n_thread);
+    ctx_comm("send")
+            .wait_on_promises([](const int3 idx) { return 1; })
+            .then_send([=, &data](const int3 global_comm_idx) {
+                assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_rank * n_thread);
                 assert(data[global_comm_idx[0]] == 1);
                 assert(my_rank >= 0 && my_rank < n_rank);
 
-                // Comms executed by the Active_message thread
+                // Executed by the active message thread on the sending rank
                 for (int i = 0; i < n_rank; ++i) {
                     if (i != my_rank) {
                         gtfxx::send(global_comm_idx, data[global_comm_idx[0]])
                                 .to_rank(i)
-                                .on_receive([n_rank, n_thread, &data](int3 global_comm_idx, int d) {
-                                    assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_thread*n_rank);
+                                .then_on_receiving_rank([=, &data](int3 global_comm_idx, int d) {
+                                    /* Executed by the active message thread on the receiving rank
+                                     * The arguments must match the arguments in send(...) above. */
+                                    assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_thread * n_rank);
                                     assert(data[global_comm_idx[0]] == -1);
                                     assert(d == 1);
 
                                     data[global_comm_idx[0]] = d;
-                                    map_comm("send").finalize(global_comm_idx);
-                                    //map_task("reduce").fulfill_promise({0, 0, 0});
+                                    ctx_comm("send").finalize(global_comm_idx);
+                                    //ctx_task("reduce").fulfill_promise({0, 0, 0});
                                 });
                     } else {
-                        map_task("reduce").fulfill_promise({0, 0, 0}); // Required in case n_rank==1
+                        ctx_task("reduce").fulfill_promise({0, 0, 0}); // Required in case n_rank==1
                     }
-
                 }
             });
 
-    /* Will run on the receiving rank; needs to be defined on the receiving rank only.
-     * All captured variables correspond to memory locations on the receiving rank.
-     * Arguments correspond to the payload defined by the sending rank.
-     * The payload is communicated over the network. */
-    map_comm("send").set_finalize([](int3 global_comm_idx) {
-        map_task("reduce").fulfill_promise({0, 0, 0});
+    /* Will run on the receiving rank, and needs to be defined on the receiving rank only.
+     * Captured variables correspond to memory locations on the receiving rank. */
+    ctx_comm("send").set_finalize([=](int3 global_comm_idx) {
+        ctx_task("reduce").fulfill_promise({0, 0, 0});
     });
 
     int local_sum;
     atomic_bool done(false);
 
-    map_task("reduce")
-            .dependency_count([n_thread, n_rank](const int3 idx) { return n_thread * n_rank; })
-            .define_task([&data, &local_sum, &done](const int3 idx) {
+    // Define TF "reduce"
+    ctx_task("reduce")
+            .wait_on_promises([=](const int3 idx) { return n_thread * n_rank; })
+            .then_run([&data, &local_sum, &done](const int3 idx) {
                 assert(idx[0] == 0);
-                assert(! done.load());
+                assert(!done.load());
                 for (auto d : data) {
                     assert(d == 1);
                 }
@@ -361,29 +362,30 @@ TEST(gtfxx, UPCXX) {
                     local_sum += d;
                 }
             })
-            .compute_on(compute_on_i);
+            .on_thread(compute_on_i);
 
-    // Start th_pool of threads
+    // Start pool of threads
     th_pool.start();
 
-    profiler.map_thread_ids(th_pool);
+    profiler.record_thread_ids(th_pool);
 
     // Create seed tasks and start
     for (int i = 0; i < n_thread; ++i) {
-        map_task("map").async({i, 0, 0});
+        ctx_task("map").seed_task({i, 0, 0});
     }
 
-    // Because of the communications, detecting quiescence requires monitoring the atomic boolean done
+    // Because of the communications, detecting quiescence
+    // requires monitoring the atomic boolean "done".
     while (!done.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    // Wait for end of task queue execution
+    // Wait for end of execution remaining tasks
     th_pool.join();
 
     upcxx::barrier();
 
-    ASSERT_EQ(local_sum, n_thread * n_rank);
+    ASSERT_EQ(local_sum, n_thread*n_rank);
 
     profiler.dump();
 }
