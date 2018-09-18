@@ -7,11 +7,11 @@ using namespace std;
 using namespace upcxx;
 using namespace gtfxx;
 
-int64_t ans = -1;
+volatile int64_t ans = -1;
 
 TEST(UPCXX, Basic) {
     // -----------------
-    // Simple upc++ test
+    // Simple UPC++ test
 
     const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
@@ -25,7 +25,7 @@ TEST(UPCXX, Basic) {
         if (i % 2) {
             msg[i] = i;
         } else {
-            msg[i] = (647 * i) % 1000;
+            msg[i] = (i * 1103515245 + 12345) % 1000; // pseudo-random number
         }
         expected += msg[i];
     }
@@ -33,6 +33,10 @@ TEST(UPCXX, Basic) {
     expected += 1 + dest;
 
     ans = -1;
+
+    // Make sure "ans" does not get updated by gtfxx::send before
+    // "ans" is initialized to -1 above
+    upcxx::barrier();
 
     gtfxx::send(gtfxx::memblock_view<int64_t>(msg.size(), &msg[0]), dummy)
             .to_rank(dest)
@@ -47,67 +51,85 @@ TEST(UPCXX, Basic) {
                 ans = sum + dummy;
             });
 
-    capture_master_thread();
+    capture_master_thread(); // master thread is in charge of making progress
 
     while (ans != expected) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // std::this_thread::sleep_for(std::chrono::microseconds(50));
         upcxx::progress();
     }
 
     ASSERT_EQ(ans, expected);
-
-    upcxx::barrier();
 }
 
 TEST(UPCXX, ThreadCommScalar) {
     // -----------------
-    // Using a Active_message thread and upc++ to send a scalar
+    // Using an active message thread and UPC++ to send a scalar
 
-    const upcxx::intrank_t n_rank = upcxx::rank_n();
-    const upcxx::intrank_t my_rank = upcxx::rank_me();
+    const auto n_rank = upcxx::rank_n();
+    const auto my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
     const int64_t payload = my_rank;
     const int64_t expected = dest;
 
-    ans = -1;
+    int local_ans(-1);
 
-    auto task_thread_comm = [my_rank, dest, payload, expected]() {
+    // Helper struct to measure time; used for debugging only
+    struct clock {
+        using clock_    = std::chrono::high_resolution_clock;
+        using duration_ = std::chrono::duration<double>;
+        std::chrono::time_point<clock_> start;
+
+        clock() : start(clock_::now()) {};
+
+        double el() {
+            return duration_(clock_::now() - start).count();
+        }
+
+        unsigned long long since_epoch() {
+            return static_cast<unsigned long long>(
+                           clock_::now().time_since_epoch() /
+                           std::chrono::microseconds(1)) - 129160000000;
+        }
+    } cck;
+
+    auto task_thread_comm = [&local_ans, my_rank, dest, payload, expected, &cck]() {
+
         // Acquiring master persona
         upcxx::persona_scope scope(upcxx::master_persona());
 
         upcxx::rpc_ff(dest,
-                      [](int64_t payload) {
+                      [&local_ans, &cck](int64_t payload) {
                           assert(payload == upcxx::rank_n() - 1 - upcxx::rank_me());
-                          ans = payload;
-                      }, payload);
+                          local_ans = payload;
+                      }, my_rank);
 
-        while (ans != expected) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        while (local_ans != expected) {
             upcxx::progress();
         }
     };
 
     release_master_thread();
 
+    // Make sure everything has been initialized before starting computation
+    upcxx::barrier();
+
     auto th_ = thread(task_thread_comm);
 
     th_.join();
 
-    ASSERT_EQ(ans, expected);
-
-    upcxx::barrier();
+    ASSERT_EQ(local_ans, expected);
 }
 
 TEST(UPCXX, ThreadCommVector) {
     // -----------------
     // Using a Active_message thread and upc++ to send a vector
 
-    const upcxx::intrank_t n_rank = upcxx::rank_n();
-    const upcxx::intrank_t my_rank = upcxx::rank_me();
+    const auto n_rank = upcxx::rank_n();
+    const auto my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
-    Vector msg(10000);
+    Vector msg(1000);
 
     int64_t my_rank_send = my_rank;
 
@@ -142,31 +164,33 @@ TEST(UPCXX, ThreadCommVector) {
                       }, upcxx::make_view(msg.begin(), msg.end()), my_rank_send);
 
         while (ans != expected) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
             upcxx::progress();
         }
     };
 
     release_master_thread();
 
+    // Make sure everything has been initialized before starting computation
+    upcxx::barrier();
+
     auto th_ = thread(task_thread_comm);
 
     th_.join();
 
     ASSERT_EQ(ans, expected);
-
-    upcxx::barrier();
 }
 
 TEST(UPCXX, GTFVector) {
+
     // -----------------
-    // Using a Active_message thread and gtf++ to send a vector
+    // Using an active message thread and GTF++ to send a vector
 
     const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
     const upcxx::intrank_t dest = n_rank - 1 - my_rank;
 
-    Vector msg(1000000);
+    Vector msg(100000);
 
     int64_t my_rank_send = my_rank;
 
@@ -198,21 +222,26 @@ TEST(UPCXX, GTFVector) {
                 });
 
         while (local_ans != expected) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            // std::this_thread::sleep_for(std::chrono::milliseconds(1));
             upcxx::progress();
         }
     };
 
     release_master_thread();
 
+    // Make sure everything has been initialized before starting computation
+    upcxx::barrier();
+
     auto th_ = thread(task_thread_comm);
 
     th_.join();
 
     ASSERT_EQ(local_ans, expected);
-
-    upcxx::barrier();
 }
+
+// -----------------------------------------
+// Testing distributed memory task flow code
+// Basic preliminary test; scalar communication
 
 // -----------------
 // Task flow context
@@ -259,10 +288,7 @@ TEST(gtfxx, UPCXX) {
     // TODO: replace by gtfxx implementations
     const upcxx::intrank_t n_rank = upcxx::rank_n();
     const upcxx::intrank_t my_rank = upcxx::rank_me();
-    const int n_thread = 4; // number of threads to use
-
-    LOG("[main] n_rank " << n_rank << "; my_rank " << my_rank <<
-                         "; n_thread " << n_thread);
+    const int n_thread = 16; // number of threads to use
 
     profiler.open("prof.out");
 
@@ -287,6 +313,18 @@ TEST(gtfxx, UPCXX) {
 
     vector<int> data(n_thread * n_rank, -1);
 
+    int expected_result = 0;
+
+    auto random_number = [](const int i) -> int {
+        return (((i * 1103515245 + 12345) % (1 << 31)) * 1103515245 + 12345) % 128;
+    };
+
+    {
+        for (int i = 0; i < data.size(); ++i) {
+            expected_result += random_number(i);
+        }
+    }
+
     auto compute_on_i = [=](int3 &idx) {
         return idx[0] % n_thread;
     };
@@ -300,7 +338,7 @@ TEST(gtfxx, UPCXX) {
                         assert(my_rank >= 0 && my_rank < n_rank);
 
                         const int global_comm_idx = idx[0] + my_rank * n_thread;
-                        data[global_comm_idx] = 1;
+                        data[global_comm_idx] = random_number(global_comm_idx);
 
                         ctx_comm("send").fulfill_promise({global_comm_idx, 0, 0});
                     })
@@ -312,7 +350,7 @@ TEST(gtfxx, UPCXX) {
             .wait_on_promises([](const int3 idx) { return 1; })
             .then_send([=, &data](const int3 global_comm_idx) {
                 assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_rank * n_thread);
-                assert(data[global_comm_idx[0]] == 1);
+                assert(data[global_comm_idx[0]] == random_number(global_comm_idx[0]));
                 assert(my_rank >= 0 && my_rank < n_rank);
 
                 // Executed by the active message thread on the sending rank
@@ -325,7 +363,7 @@ TEST(gtfxx, UPCXX) {
                                      * The arguments must match the arguments in send(...) above. */
                                     assert(global_comm_idx[0] >= 0 && global_comm_idx[0] < n_thread * n_rank);
                                     assert(data[global_comm_idx[0]] == -1);
-                                    assert(d == 1);
+                                    assert(d == random_number(global_comm_idx[0]));
 
                                     data[global_comm_idx[0]] = d;
                                     ctx_comm("send").finalize(global_comm_idx);
@@ -349,11 +387,11 @@ TEST(gtfxx, UPCXX) {
     // Define TF "reduce"
     ctx_task("reduce")
             .wait_on_promises([=](const int3 idx) { return n_thread * n_rank; })
-            .then_run([&data, &local_sum, &done](const int3 idx) {
+            .then_run([=, &data, &local_sum, &done](const int3 idx) {
                 assert(idx[0] == 0);
                 assert(!done.load());
-                for (auto d : data) {
-                    assert(d == 1);
+                for (int i = 0; i < data.size(); ++i) {
+                    assert(data[i] == random_number(i));
                 }
 
                 done.store(true); // This is the last task that we need to run
@@ -361,6 +399,7 @@ TEST(gtfxx, UPCXX) {
                 for (auto d : data) {
                     local_sum += d;
                 }
+                assert(local_sum == expected_result);
             })
             .on_thread(compute_on_i);
 
@@ -368,6 +407,9 @@ TEST(gtfxx, UPCXX) {
     th_pool.start();
 
     profiler.record_thread_ids(th_pool);
+
+    // Make sure everything has been initialized before starting the actual computation
+    upcxx::barrier();
 
     // Create seed tasks and start
     for (int i = 0; i < n_thread; ++i) {
@@ -377,15 +419,13 @@ TEST(gtfxx, UPCXX) {
     // Because of the communications, detecting quiescence
     // requires monitoring the atomic boolean "done".
     while (!done.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
     }
 
     // Wait for end of execution remaining tasks
     th_pool.join();
 
-    upcxx::barrier();
-
-    ASSERT_EQ(local_sum, n_thread*n_rank);
+    ASSERT_EQ(local_sum, expected_result);
 
     profiler.dump();
 }
