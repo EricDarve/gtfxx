@@ -39,7 +39,7 @@ This will create an executable in the `bin/` directory. The source files are in 
 
 To run the code, use the following command:
 <pre>
-/path/to/upcxxinstall/upcxx/bin/upcxx-run -n 16 ./gtfxx --gtest_filter=* --gtest_break_on_failure --gtest_repeat=1
+/path/to/upcxx/install/dir/upcxx/bin/upcxx-run -n 16 /path/to/executable/gtfxx --gtest_filter=* --gtest_break_on_failure --gtest_repeat=1
 </pre>
 This will run the code using the [Google test](https://github.com/google/googletest) framework.
 
