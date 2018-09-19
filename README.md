@@ -3,43 +3,34 @@ Global Task Flow library
 
 A library that performs calculations on distributed and shared memory machines using tasks with dependencies. The execution is fully asynchronous. The communications are done using active messages. The implementation uses [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home) and [GASNet-EX](https://gasnet.lbl.gov/) as backends.
 
+The project is currently being developed and tested on macOS High Sierra.
+
 ## Installation instructions
 
-We need to first install [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home).
-
-[Installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md)
-
-Make a note of the directory where UPC++ was installed. See the [installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md).
-
-In the file CMakeLists.txt, update the following settings:
+You can compile the file `main.cpp` (which implements some basic tests) with the following:
 <pre>
-set(UPCXX_INSTALL "/path/to/upcxx/install/directory")
-set(UPCXX_THREADMODE "par")
-</pre>
-to match your installation of UPC++. See
-<pre>
-cd <upcxx-source-path>
-./install <upcxx-install-path>
-</pre>
-in the [UPC++ instructions](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md).
-
-Then, you can compile the test files using:
-<pre>
+cd <root directory containing the git clone repository of gtfxx>
 mkdir build
 cd build
 cmake ..
-make
 make install
 </pre>
-This will create an executable in the `bin/` directory. The source files are in `src/`. 
+This will create the executable `gtfxx` in the `bin/` directory. The source files are in `src/`. The include files are in `include/`.
 
-`build/` contains compiled object files and cmake files.
+`build/` contains compiled object files and cmake files. You can delete the content of `build/` if you want to rebuild the entire project (including UPCXX, GASNet and the Google test framework) from scratch.
+
+The CMake file `CMakeLists.txt` is configured to download and install [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home). The UPC++ installation script in turn downloads and install [GASNet-EX](https://gasnet.lbl.gov/). This happens when you run `make` in the `build/` directory.
+
+For more information about the installation process for UPC++, see the [installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md).
+
+`CMakeLists.txt` also has instructions to download and install the [Google Test framework](https://github.com/google/googletest). The file `main.cpp` is configured to run Google tests at this time. This is used to test and develop the GTF++ library.
 
 ## How to run a GTF++ code
 
 To run the code, use the following command:
 <pre>
-/path/to/upcxx/install/dir/upcxx/bin/upcxx-run -n 16 /path/to/executable/gtfxx --gtest_filter=* --gtest_break_on_failure --gtest_repeat=1
+cd <root directory containing the git clone repository of gtfxx>
+./build/upcxx/bin/upcxx-run -n 16 ./bin/gtfxx --gtest_filter=* --gtest_break_on_failure --gtest_repeat=1
 </pre>
 This will run the code using the [Google test](https://github.com/google/googletest) framework.
 
