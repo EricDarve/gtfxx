@@ -9,7 +9,7 @@ target_compile_features(gtfxx PUBLIC cxx_std_11)
 project(upcxx-download NONE)
 include(ExternalProject)
 ExternalProject_Add(upcxx
-  PREFIX upcxx
+  PREFIX upcxx-download
   URL "https://bitbucket.org/upcxx/upcxx/downloads/upcxx-2018.3.2.tar.gz"
   INSTALL_DIR upcxx
   CONFIGURE_COMMAND ""
