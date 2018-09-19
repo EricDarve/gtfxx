@@ -19,7 +19,7 @@ ExternalProject_Add(upcxx
   TEST_COMMAND      ""
 )
 
-set(UPCXX_INSTALL "/Users/darve/git/ctxx/upcxx")
+set(UPCXX_INSTALL "upcxx")
 set(UPCXX_THREADMODE "par")
 
 set(ENV "UPCXX_THREADMODE=${UPCXX_THREADMODE}")
