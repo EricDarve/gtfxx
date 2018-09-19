@@ -6,6 +6,19 @@ target_compile_features(gtfxx PUBLIC cxx_std_11)
 # -------------------------
 # UPCXX
 
+project(upcxx-download NONE)
+include(ExternalProject)
+ExternalProject_Add(upcxx
+  PREFIX upcxx
+  URL "https://bitbucket.org/upcxx/upcxx/downloads/upcxx-2018.3.2.tar.gz"
+  INSTALL_DIR upcxx
+  CONFIGURE_COMMAND ""
+  BUILD_IN_SOURCE true
+  BUILD_COMMAND     ./install ../../../upcxx
+  INSTALL_COMMAND   ""
+  TEST_COMMAND      ""
+)
+
 set(UPCXX_INSTALL "/Users/darve/git/ctxx/upcxx")
 set(UPCXX_THREADMODE "par")
 
