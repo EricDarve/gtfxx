@@ -18,9 +18,15 @@ make install
 </pre>
 This will create the executable `gtfxx` in the `bin/` directory. The source files are in `src/`. The include files are in `include/`.
 
+You can use
+<pre>
+make VERBOSE=1
+</pre>
+to get more information about the building process (compilation flags being used, etc).
+
 ## What happens when you run `make install`
 
-The CMake file `CMakeLists.txt` is configured to download and install [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home). The UPC++ installation script (`build/upcxx-download/src/upcxx/install`) in turn downloads and install [GASNet-EX](https://gasnet.lbl.gov/). This happens when you run `make install` in the `build/` directory.
+The CMake file `CMakeLists.txt` is configured to download and install [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home). The UPC++ installation script (`build/upcxx-download/src/upcxx/install`) in turn downloads and installs [GASNet-EX](https://gasnet.lbl.gov/). This happens when you run `make install` in the `build/` directory.
 
 For more information about the installation process for UPC++, see the [installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md).
 
@@ -28,7 +34,7 @@ For more information about the installation process for UPC++, see the [installa
 
 `build/` contains compiled object files and cmake files. You can delete the content of `build/` if you want to rebuild the entire project (including UPC++, GASNet, and the Google test framework) from scratch.
 
-The UPC++ files after installation are in `build/upcxx/`.
+The UPC++ files after installation are in `build/upcxx/`. The UPC++ binaries, `upcxx-run` (required to run the code) and `upcxx-meta` (used in the compilation process), are in `build/upcxx/bin/`.
 
 ## How to run a GTF++ code
 
