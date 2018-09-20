@@ -1,29 +1,12 @@
-*.dSYM
-*.prof
-*.orig
-*.pprof
 *.out
-*.cbp
 
 .ipynb_checkpoints
 .idea
 
-gtfxx
 test.cpp
-
-CMakeFiles
-CMakeCache.txt
-cmake_install.cmake
-Makefile
 
 build/
 bin/
-
-upcxx/
-
-googletest-build/
-googletest-download/
-googletest-src/
 
 output.txt
 
