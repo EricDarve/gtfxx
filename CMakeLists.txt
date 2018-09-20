@@ -88,6 +88,7 @@ separate_arguments(PPFLAGS UNIX_COMMAND "${PPFLAGS}")
 target_compile_options(gtfxx PRIVATE ${PPFLAGS}) # UPCXX pre-processing flags
 
 # Include directories for compilation
+# FIXME need to mention this in README
 target_include_directories(gtfxx PRIVATE /usr/local/Cellar/eigen/3.3.4/include/eigen3)
 target_include_directories(gtfxx PRIVATE include)
 
