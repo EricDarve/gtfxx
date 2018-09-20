@@ -4,23 +4,33 @@ add_executable(gtfxx src/main.cpp src/gtfxx.cpp src/util.cpp)
 target_compile_features(gtfxx PUBLIC cxx_std_11)
 
 # -------------------------
-# UPCXX
+# UPC++
+# UPC++ cmake commands
+# Download and unpack UPC++ at configure time
 
-project(upcxx-download NONE)
-include(ExternalProject)
-ExternalProject_Add(upcxx
-  PREFIX upcxx-download
-  URL "https://bitbucket.org/upcxx/upcxx/downloads/upcxx-2018.3.2.tar.gz"
-  INSTALL_DIR upcxx
-  CONFIGURE_COMMAND ""
-  BUILD_IN_SOURCE true
-  BUILD_COMMAND     ./install ../../../upcxx
-  INSTALL_COMMAND   ""
-  TEST_COMMAND      ""
-)
+# Configure file in CMakeLists.upcxx.txt
+# Build is done in upcxx-build/
+# The installed UPC++ library is in upcxx/
+configure_file(CMakeLists.upcxx.txt upcxx-build/CMakeLists.txt)
 
-set(UPCXX_INSTALL "upcxx")
-set(UPCXX_THREADMODE "par")
+# Create CMake files
+execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}" .
+        RESULT_VARIABLE result
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/upcxx-build )
+if(result)
+    message(FATAL_ERROR "CMake step for upcxx failed: ${result}")
+endif()
+# Download and build UPC++ target
+execute_process(COMMAND ${CMAKE_COMMAND} --build .
+        RESULT_VARIABLE result
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/upcxx-build )
+if(result)
+    message(FATAL_ERROR "Build step for upcxx failed: ${result}")
+endif()
+
+# Some shell scripts are required to obtain the compilation options
+set(UPCXX_INSTALL upcxx)
+set(UPCXX_THREADMODE par) # Needed for GTF++ to work properly
 
 set(ENV "UPCXX_THREADMODE=${UPCXX_THREADMODE}")
 
@@ -30,7 +40,8 @@ execute_process(COMMAND bash -c "${ENV} ${UPCXX_INSTALL}/bin/upcxx-meta PPFLAGS"
 execute_process(COMMAND bash -c "${ENV} ${UPCXX_INSTALL}/bin/upcxx-meta LDFLAGS" OUTPUT_VARIABLE LDFLAGS OUTPUT_STRIP_TRAILING_WHITESPACE)
 execute_process(COMMAND bash -c "${ENV} ${UPCXX_INSTALL}/bin/upcxx-meta LIBFLAGS" OUTPUT_VARIABLE LIBS OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-message("UPC++ compiling options")
+message("------------------------")
+message("UPC++ compiling options:")
 message("Compiler: ${CXX}")
 message("Pre-processing flags: ${PPFLAGS}")
 message("Linker flags: ${LDFLAGS}")
@@ -40,7 +51,7 @@ message("Libraries: ${LIBS}")
 # Google test cmake commands
 # Download and unpack googletest at configure time
 
-configure_file(CMakeLists.txt.in googletest-download/CMakeLists.txt)
+configure_file(CMakeLists.gtest.txt googletest-download/CMakeLists.txt)
 execute_process(COMMAND ${CMAKE_COMMAND} -G "${CMAKE_GENERATOR}" .
         RESULT_VARIABLE result
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/googletest-download )
@@ -73,9 +84,9 @@ endif()
 
 # Example instructions for using Google tests:
 # Link against gtest or gtest_main as needed. Eg
-#add_executable(example example.cpp)
-#target_link_libraries(example gtest_main)
-#add_test(NAME example_test COMMAND example)
+# add_executable(example example.cpp)
+# target_link_libraries(example gtest_main)
+# add_test(NAME example_test COMMAND example)
 
 # -------------------------
 # Ready to compile our code
@@ -89,7 +100,10 @@ target_compile_options(gtfxx PRIVATE ${PPFLAGS}) # UPCXX pre-processing flags
 
 # Include directories for compilation
 # FIXME need to mention this in README
+# The next line is required only if Eigen is used
 target_include_directories(gtfxx PRIVATE /usr/local/Cellar/eigen/3.3.4/include/eigen3)
+
+# GTF++ include files
 target_include_directories(gtfxx PRIVATE include)
 
 # Options for linking
