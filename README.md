@@ -26,13 +26,15 @@ to get more information about the building process (compilation flags being used
 
 ## What happens when you run `make install`
 
-The CMake file `CMakeLists.txt` is configured to download and install [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home). The UPC++ installation script (`build/upcxx-download/src/upcxx/install`) in turn downloads and installs [GASNet-EX](https://gasnet.lbl.gov/). This happens when you run `make install` in the `build/` directory.
+The CMake file `CMakeLists.txt` is configured to download and install [UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/Home). The UPC++ installation script  
+`build/upcxx-build/upcxx-download/src/upcxx/install`  
+in turn downloads and installs [GASNet-EX](https://gasnet.lbl.gov/).
 
 For more information about the installation process for UPC++, see the [installation instructions for UPC++](https://bitbucket.org/berkeleylab/upcxx/wiki/INSTALL.md).
 
 `CMakeLists.txt` also has instructions to download and install the [Google Test framework](https://github.com/google/googletest). The file `src/main.cpp` is configured to run Google tests at this time. This is used to test and develop the GTF++ library.
 
-`build/` contains compiled object files and cmake files. You can delete the content of `build/` if you want to rebuild the entire project (including UPC++, GASNet, and the Google test framework) from scratch.
+`build/` contains compiled object files and cmake files. You can delete the content of `build/` if you want to rebuild the entire project (including UPC++, GASNet, and the Google test framework) from scratch. This will download and recompile again the UPC++ and Google Test libraries.
 
 The UPC++ files after installation are in `build/upcxx/`. The UPC++ binaries, `upcxx-run` (required to run the code) and `upcxx-meta` (used in the compilation process), are in `build/upcxx/bin/`.
 
