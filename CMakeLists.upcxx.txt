@@ -2,8 +2,6 @@ cmake_minimum_required(VERSION 3.11)
 
 project(upcxx NONE)
 
-message("UPC++ cmd: export CXX=${CMAKE_C_COMPILER}; ./install ../../../../upcxx")
-
 # Download and install UPC++
 # Installed files are in upcxx/
 # Downloaded files are in upcxx-build/upcxx-download
