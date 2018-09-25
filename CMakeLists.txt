@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.11)
+
+# Set your preferred compilers here
+SET(CMAKE_C_COMPILER /usr/bin/gcc)
+SET(CMAKE_CXX_COMPILER /usr/bin/g++)
+
 project(gtfxx LANGUAGES CXX)
 add_executable(gtfxx src/main.cpp src/gtfxx.cpp src/util.cpp)
 target_compile_features(gtfxx PUBLIC cxx_std_11)

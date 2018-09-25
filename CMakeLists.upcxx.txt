@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.11)
 
 project(upcxx NONE)
 
+message("UPC++ cmd: export CXX=${CMAKE_C_COMPILER}; ./install ../../../../upcxx")
+
 # Download and install UPC++
 # Installed files are in upcxx/
 # Downloaded files are in upcxx-build/upcxx-download
@@ -12,7 +14,7 @@ ExternalProject_Add(upcxx
   INSTALL_DIR       ../upcxx
   CONFIGURE_COMMAND ""
   BUILD_IN_SOURCE   1
-  BUILD_COMMAND     ./install ../../../../upcxx
+  BUILD_COMMAND     cp ../../../../../src/system-checks.sh utils/. COMMAND CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER} ./install ../../../../upcxx
   INSTALL_COMMAND   ""
   TEST_COMMAND      ""
 )
