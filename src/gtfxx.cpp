@@ -56,11 +56,13 @@ void Thread_prio::spawn(Task *a_t) {
     std::lock_guard<std::mutex> lck(mtx);
     m_empty.store(false);
     ready_queue.push(a_t); // Add task to queue
+    message_queue.push(a_t); // Add task to queue
 }
 
 Task *Thread_prio::pop_unsafe() {
     Task *tsk = ready_queue.top();
     ready_queue.pop();
+    message_queue.pop();
     if (ready_queue.empty())
         m_empty.store(true);
     return tsk;

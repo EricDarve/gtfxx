@@ -7,6 +7,8 @@
 
 #include "util.h"
 
+#include "queue_lockfree.hpp"
+
 namespace gtfxx {
 
 // ---------------------
@@ -43,6 +45,8 @@ namespace gtfxx {
 
         std::priority_queue<Task *, std::vector<Task *>, Task_comparison> ready_queue;
         std::mutex mtx; // Used to manage access to the priority queue
+
+        Queue_lockfree<Task *> message_queue;
 
         std::thread th; // thread that will execute the tasks
 
